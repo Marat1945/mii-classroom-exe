@@ -185,3 +185,96 @@ def export_schedule_docx(config,path,show_bells=False,show_meal=False,show_numbe
                     if index==0:run.bold=True
     doc.save(path)
     return Path(path)
+
+def export_schedule_jpeg(config,path,show_bells=False,show_meal=False,show_numbers=True):
+    """Створити друкований розклад JPEG без зовнішніх інтернет-сервісів."""
+    from PIL import Image,ImageDraw,ImageFont
+    from textwrap import wrap
+    from pathlib import Path
+    import os
+
+    def pick_font(size,bold=False):
+        names=(
+            ["C:/Windows/Fonts/arialbd.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
+            if bold else
+            ["C:/Windows/Fonts/arial.ttf","/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+        )
+        for name in names:
+            if Path(name).exists():
+                return ImageFont.truetype(name,size)
+        return ImageFont.load_default()
+
+    width=2000
+    margin=55
+    label_w=190
+    day_w=(width-2*margin-label_w)//5
+    row_h=124 if not show_bells else 142
+    title_h=185
+    header_h=100
+    row_count=len(config.get("period_times",[]))
+    meal_after=int(config.get("meal_break_after",2))
+    has_meal=(show_meal and 0<meal_after<=row_count)
+    height=title_h+header_h+row_h*row_count+(62 if has_meal else 0)+margin
+    img=Image.new("RGB",(width,height),"white")
+    draw=ImageDraw.Draw(img)
+    bold=pick_font(35,True);regular=pick_font(29)
+    header=pick_font(33,True);title=pick_font(46,True)
+    small=pick_font(24)
+    title_txt="НАВАНТАЖЕННЯ · РОЗКЛАД УРОКІВ"
+    left=(width-draw.textbbox((0,0),title_txt,font=title)[2])//2
+    draw.text((left,27),title_txt,font=title,fill="#182e43")
+    subtitle=f"Навчальний рік {config['year_start'][:4]}–{config['year_end'][:4]}   •   Чисельник / знаменник"
+    subleft=(width-draw.textbbox((0,0),subtitle,font=regular)[2])//2
+    draw.text((subleft,105),subtitle,font=regular,fill="#3b5160")
+    y=title_h
+    headers=("№","Понеділок","Вівторок","Середа","Четвер","П’ятниця")
+    x_positions=[margin,margin+label_w]+[margin+label_w+i*day_w for i in range(1,6)]
+    for i,header_txt in enumerate(headers):
+        x=x_positions[i]
+        w=label_w if i==0 else day_w
+        draw.rectangle((x,y,x+w,y+header_h),fill="#d9eaf4",outline="#899daa",width=2)
+        bounds=draw.textbbox((0,0),header_txt,font=header)
+        draw.text((x+(w-(bounds[2]-bounds[0]))//2,y+30),header_txt,font=header,fill="#182e43")
+    y+=header_h
+    for row_num in range(1,row_count+1):
+        start,end=config["period_times"][row_num-1]
+        for j in range(6):
+            x=x_positions[j]
+            cell_w=label_w if j==0 else day_w
+            draw.rectangle((x,y,x+cell_w,y+row_h),fill="white",outline="#899daa",width=2)
+            if j==0:
+                title_row=str(row_num) if show_numbers else ""
+                time_row=f"{start}–{end}" if show_bells else ""
+                if title_row:
+                    draw.text((x+cell_w//2-11,y+20),title_row,font=bold,fill="#172839")
+                if time_row:
+                    time_font=small
+                    tw=draw.textbbox((0,0),time_row,font=time_font)[2]
+                    draw.text((x+(cell_w-tw)//2,y+row_h-45),time_row,font=time_font,fill="#27384a")
+            else:
+                pairs=config["days"].get(str(j-1),[])
+                first,second=pairs[row_num-1] if len(pairs)>=row_num else (None,None)
+                # The '-' placeholder is never printed for an empty week.
+                content=first if first==second else (f"{first or ''} / {second or ''}" if first or second else "")
+                content=str(content or "")
+                lines=[]
+                chunk=""
+                for word in content.split():
+                    candidate=(chunk+" "+word).strip()
+                    if chunk and draw.textbbox((0,0),candidate,font=regular)[2]>cell_w-20:
+                        lines.append(chunk);chunk=word
+                    else:chunk=candidate
+                if chunk:lines.append(chunk)
+                for i,line in enumerate(lines[:3]):
+                    w=draw.textbbox((0,0),line,font=regular)[2]
+                    draw.text((x+(cell_w-w)//2,y+22+i*34),
+                              line,font=regular,fill="#182e43")
+        y+=row_h
+        if row_num==meal_after and has_meal:
+            draw.rectangle((margin,y,width-margin,y+62),fill="#fff1d8",outline="#899daa",width=2)
+            label=config.get("meal_label","ХАРЧУВАННЯ У ЇДАЛЬНІ")
+            txtw=draw.textbbox((0,0),label,font=bold)[2]
+            draw.text(((width-txtw)//2,y+12),label,font=bold,fill="#9b4b04")
+            y+=62
+    img.save(path,"JPEG",quality=94,subsampling=0)
+    return Path(path)

@@ -1,13 +1,39 @@
 """Tkinter-редактор КТП/розкладу/класів/року, повністю локальний."""
 from __future__ import annotations
 import copy
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from pathlib import Path
 from .editor_core import deep_copy_data, guess_columns, extract_lessons, docx_table_rows, csv_rows, persist, validate_working, tidy
 from .engine import ROOT, save_state
 
+
+def friendly_plan_id(code):
+    """Українська позначка в інтерфейсі; старий ідентифікатор залишається в базі."""
+    variants={"iu":"ІУ","vi":"ВІ","go":"ГО","law":"Право","hist":"Історія",
+              "profile":"профіль","standard":"стандарт"}
+    bits=re.split(r"[_\s]+",str(code))
+    if not bits:return str(code)
+    letter={"B":"Б","G":"Г","A":"А","V":"В"}
+    m=re.fullmatch(r"(\d+)([ABGV])",bits[0],re.I)
+    if m:
+        grade=m.group(1)
+        group=letter.get(m.group(2).upper(),m.group(2))
+        first=f"{grade}-{group}"
+    else:first=bits[0]
+    other=[variants.get(v.casefold(),v) for v in bits[1:]]
+    return " ".join([first]+other)
+
+def display_ui_date(iso):
+    return date.fromisoformat(iso).strftime("%d.%m.%Y")
+
+def parse_ui_date(value):
+    value=str(value).strip()
+    if "." in value:
+        return datetime.strptime(value,"%d.%m.%Y").date().isoformat()
+    return date.fromisoformat(value).isoformat()
 
 def attach_paste(widget, host):
     """Вставлення навіть тоді, коли системні прив'язки Ctrl+V не працюють."""
@@ -156,6 +182,7 @@ class SchoolEditor(tk.Toplevel):
         ttk.Label(outer,text="Редагуйте та перевіряйте локально. До Google нічого не надсилається.",
                   foreground="#245471").pack(anchor="w")
         notebook=ttk.Notebook(outer);notebook.pack(fill="both",expand=True,pady=7)
+        self.notebook=notebook
         self.tab_plans=ttk.Frame(notebook);self.tab_schedule=ttk.Frame(notebook)
         self.tab_streams=ttk.Frame(notebook);self.tab_year=ttk.Frame(notebook)
         notebook.add(self.tab_plans,text="КАЛЕНДАРНІ ПЛАНИ")
@@ -191,6 +218,7 @@ class SchoolEditor(tk.Toplevel):
         self.planlist=tk.Listbox(left,width=29,exportselection=False,height=22)
         self.planlist.pack(fill="y",expand=True)
         self.planlist.bind("<<ListboxSelect>>",self.plan_selected)
+        self.planlist.bind("<Button-3>",self._plan_context_menu)
         ttk.Button(left,text="+ Створити новий план",command=self.add_plan).pack(fill="x",pady=4)
         ttk.Button(left,text="Імпортувати DOCX / DOC / CSV",command=self.import_plan).pack(fill="x",pady=4)
         ttk.Button(left,text="Позначити план перевіреним",command=self.approve_plan).pack(fill="x",pady=4)
@@ -207,6 +235,8 @@ class SchoolEditor(tk.Toplevel):
         self.lessons.configure(yscrollcommand=vert.set)
         self.lessons.pack(side="left",fill="both",expand=True);vert.pack(side="right",fill="y")
         self.lessons.bind("<<TreeviewSelect>>",self.lesson_selected)
+        self.lessons.bind("<Button-3>",self._lesson_context_menu)
+        self.lessons.bind("<Double-1>",lambda _:self.topictext.focus_set())
         form=ttk.Frame(right);form.pack(fill="x")
         ttk.Label(form,text="Тема вибраного уроку (можна редагувати)").pack(anchor="w")
         self.topictext=tk.Text(form,height=3,wrap="word")
@@ -223,10 +253,37 @@ class SchoolEditor(tk.Toplevel):
             ttk.Button(rowbuttons,text=label,command=fn).pack(side="left",padx=3)
         self._refresh_planlist()
 
+    def _plan_context_menu(self,event):
+        index=self.planlist.nearest(event.y)
+        if index<0:return
+        self.planlist.selection_clear(0,"end");self.planlist.selection_set(index)
+        self.plan_selected()
+        menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label="Імпортувати план…",command=self.import_plan)
+        menu.add_command(label="Новий план…",command=self.add_plan)
+        menu.add_command(label="Позначити план перевіреним",command=self.approve_plan)
+        menu.tk_popup(event.x_root,event.y_root);menu.grab_release()
+
+    def _lesson_context_menu(self,event):
+        item=self.lessons.identify_row(event.y)
+        if item:
+            self.lessons.selection_set(item);self.lesson_selected()
+        menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label="Редагувати тему й Д/з",command=lambda:self.topictext.focus_set())
+        menu.add_command(label="Застосувати зміни",command=self.apply_lesson)
+        menu.add_separator()
+        menu.add_command(label="Додати наступний урок",command=self.add_lesson)
+        menu.add_command(label="Видалити урок",command=self.delete_lesson)
+        menu.add_separator()
+        menu.add_command(label="Пересунути вгору",command=lambda:self.move_lesson(-1))
+        menu.add_command(label="Пересунути вниз",command=lambda:self.move_lesson(1))
+        menu.tk_popup(event.x_root,event.y_root);menu.grab_release()
+
     def _refresh_planlist(self,chosen=None):
         keys=list(self.plans)
         self.planlist.delete(0,"end")
-        for key in keys:self.planlist.insert("end",key)
+        self.plan_keys=keys
+        for key in keys:self.planlist.insert("end",friendly_plan_id(key))
         if keys:
             k=chosen if chosen in keys else (self.current_plan if self.current_plan in keys else keys[0])
             self.planlist.selection_set(keys.index(k));self.plan_selected()
@@ -235,7 +292,7 @@ class SchoolEditor(tk.Toplevel):
     def plan_selected(self,_event=None):
         indexes=self.planlist.curselection()
         if not indexes:return
-        self.current_plan=self.planlist.get(indexes[0])
+        self.current_plan=self.plan_keys[indexes[0]]
         self.refresh_lessons()
 
     def refresh_lessons(self,selected=None):
@@ -246,7 +303,7 @@ class SchoolEditor(tk.Toplevel):
         for i,row in enumerate(entries):
             self.lessons.insert("","end",iid=str(i),values=(i+1,row["topic"],row.get("homework","")))
         extra=" ⚠ ПЕРЕВІРТЕ КТП НОВОГО РОКУ" if doc.get("needs_review") else ""
-        self.plan_name.config(text=f"{self.current_plan} • {doc.get('filename','План без джерела')[:90]}{extra}")
+        self.plan_name.config(text=f"{friendly_plan_id(self.current_plan)} • {doc.get('filename','План без джерела')[:90]}{extra}")
         self.plan_count.config(text=f"{len(entries)} уроків. Зміни будуть збережені лише після загальної кнопки «ЗБЕРЕГТИ»")
         self.lesson_row=None
         if entries:
@@ -306,10 +363,12 @@ class SchoolEditor(tk.Toplevel):
         self._renumber();self.refresh_lessons(j)
 
     def add_plan(self):
-        planid=simpledialog.askstring("Новий КТП","Ідентифікатор плану латиницею (наприклад, 8_iu_2027):",parent=self)
+        planid=simpledialog.askstring("Новий КТП","Введіть назву плану, наприклад «8 ІУ 2027»:",
+                                     parent=self)
         if not planid:return
-        if not planid.isascii() or not planid.replace("_","").isalnum():
-            messagebox.showerror("Назва плану","Використайте латинські літери, цифри й _. ",parent=self);return
+        planid=planid.strip()
+        if not planid:
+            messagebox.showwarning("КТП","Назва не може бути порожньою.",parent=self);return
         if planid in self.plans:
             messagebox.showerror("КТП","Такий план уже є.",parent=self);return
         self.plans[planid]={"filename":"Створено вручну","lessons":[],"needs_review":True}
@@ -343,18 +402,26 @@ class SchoolEditor(tk.Toplevel):
     def _schedule_ui(self):
         tab=self.tab_schedule
         ttk.Label(tab,text="Для кожного уроку вкажіть потік ЧИСЕЛЬНИКА і ЗНАМЕННИКА. Якщо щотижня — виберіть той самий потік в обох полях.").pack(anchor="w",pady=7)
-        self.dayselect=ttk.Combobox(tab,state="readonly",values=("Понеділок","Вівторок","Середа","Четвер","П'ятниця"),width=20)
-        self.dayselect.current(0);self.dayselect.pack(anchor="w",pady=4)
+        daybar=ttk.Frame(tab);daybar.pack(anchor="w",pady=4)
+        ttk.Button(daybar,text="◀",width=4,
+                   command=lambda:self.shift_schedule_day(-1)).pack(side="left",padx=3)
+        self.dayselect=ttk.Combobox(daybar,state="readonly",
+            values=("Понеділок","Вівторок","Середа","Четвер","П'ятниця"),width=20)
+        self.dayselect.current(0);self.dayselect.pack(side="left")
+        ttk.Button(daybar,text="▶",width=4,
+                   command=lambda:self.shift_schedule_day(1)).pack(side="left",padx=3)
         self.dayselect.bind("<<ComboboxSelected>>",lambda _:self.refresh_slots())
         table=ttk.Frame(tab);table.pack(fill="both",expand=True,pady=10)
         self.slots=ttk.Treeview(table,columns=("period","time","numerator","denominator"),show="headings",height=9)
         for col,t,w in (("period","№",55),("time","Час",160),("numerator","ЧИСЕЛЬНИК",300),("denominator","ЗНАМЕННИК",300)):
             self.slots.heading(col,text=t);self.slots.column(col,width=w)
         self.slots.pack(fill="both",expand=True)
+        self.slots.bind("<Double-1>",self._open_calendar_for_slot)
         controls=ttk.Frame(tab);controls.pack(fill="x",pady=5)
         ttk.Button(controls,text="Змінити вибраний урок",command=self.edit_slot).pack(side="left",padx=3)
         ttk.Button(controls,text="Імпортувати розклад DOCX/CSV/XLSX",command=self.import_schedule).pack(side="left",padx=3)
         ttk.Button(controls,text="Згенерувати Word-розклад",command=self.export_schedule).pack(side="left",padx=3)
+        ttk.Button(controls,text="Згенерувати JPEG-розклад",command=self.export_schedule_jpeg).pack(side="left",padx=3)
         opts=ttk.Frame(tab);opts.pack(fill="x",pady=5)
         self.show_bells=tk.BooleanVar(value=self.cfg.get("print_bells",False))
         self.show_meal=tk.BooleanVar(value=self.cfg.get("print_meal",False))
@@ -372,7 +439,30 @@ class SchoolEditor(tk.Toplevel):
         for i in self.slots.get_children():self.slots.delete(i)
         for i,pair in enumerate(self.cfg["days"].get(day,[])):
             start,end=self.cfg["period_times"][i]
-            self.slots.insert("","end",iid=str(i),values=(i+1,f"{start}–{end}",pair[0] or "—",pair[1] or "—"))
+            self.slots.insert("","end",iid=str(i),values=(i+1,f"{start}–{end}",pair[0] or "",pair[1] or ""))
+
+    def shift_schedule_day(self,amount):
+        self.dayselect.current((self.dayselect.current()+amount)%5)
+        self.refresh_slots()
+
+    def _open_calendar_for_slot(self,event):
+        """Подвійне натискання переходить до КТП предмета цього уроку."""
+        item=self.slots.identify_row(event.y)
+        if not item:return
+        index=int(item)
+        pair=self.cfg["days"].get(str(self.dayselect.current()),[])[index]
+        col=self.slots.identify_column(event.x)
+        stream=pair[1] if col=="#4" else pair[0]
+        if not stream:stream=pair[0] or pair[1]
+        if not stream:return
+        mapping=self.cfg["course_map"].get(stream,{})
+        plan=mapping.get("plan")
+        if plan not in self.plans:return
+        self.notebook.select(self.tab_plans)
+        self.planlist.selection_clear(0,"end")
+        self.planlist.selection_set(self.plan_keys.index(plan))
+        self.planlist.see(self.plan_keys.index(plan))
+        self.plan_selected()
 
     def edit_slot(self):
         choice=self.slots.selection()
@@ -401,6 +491,9 @@ class SchoolEditor(tk.Toplevel):
         for col,title,w in (("name","Клас + предмет / потік",230),("plan","Ідентифікатор КТП",160),("course","Назва у Google Classroom",310)):
             self.streamtree.heading(col,text=title);self.streamtree.column(col,width=w)
         self.streamtree.pack(fill="both",expand=True,pady=4)
+        self.streamtree.bind("<Double-1>",self._inline_stream_edit)
+        ttk.Label(tab,text="Двічі клацніть по КТП або назві Classroom для зміни прямо у таблиці.",
+                  foreground="#245471").pack(anchor="w")
         bar=ttk.Frame(tab);bar.pack(fill="x",pady=8)
         for title,fn in [("Додати потік",lambda:self.edit_stream(True)),
                          ("Редагувати потік",lambda:self.edit_stream(False)),("Видалити потік",self.remove_stream)]:
@@ -410,9 +503,55 @@ class SchoolEditor(tk.Toplevel):
     def refresh_streams(self):
         self.streamtree.delete(*self.streamtree.get_children())
         for ix,(stream,info) in enumerate(sorted(self.cfg["course_map"].items())):
-            self.streamtree.insert("","end",iid=str(ix),values=(stream,info["plan"],info["course_title"]))
+            self.streamtree.insert("","end",iid=str(ix),values=(
+                stream,friendly_plan_id(info["plan"]),info["course_title"]))
         self.cfg["classroom_course_titles"]=list(dict.fromkeys(
             info["course_title"] for info in self.cfg["course_map"].values()))
+
+    def _inline_stream_edit(self,event):
+        item=self.streamtree.identify_row(event.y)
+        column=self.streamtree.identify_column(event.x)
+        if not item or column not in ("#2","#3"):return
+        bbox=self.streamtree.bbox(item,column)
+        if not bbox:return
+        current=self.streamtree.item(item,"values")[0]
+        current_info=self.cfg["course_map"].get(current,{})
+        is_plan=column=="#2"
+        if is_plan:
+            options=[friendly_plan_id(key) for key in self.plans]
+            current_value=friendly_plan_id(current_info.get("plan",""))
+        else:
+            options=sorted(set(
+                list(self.cfg.get("classroom_course_titles",[]))+
+                [m.get("course_title","") for m in self.cfg["course_map"].values()]+
+                [item.get("name","") for item in getattr(self.parent,"google_courses",[])]))
+            current_value=current_info.get("course_title","")
+        x,y,width,height=bbox
+        editor=ttk.Combobox(self.streamtree,values=options,
+                            state="readonly" if is_plan else "normal")
+        editor.set(current_value)
+        editor.place(x=x,y=y,width=width,height=height)
+        editor.focus_set()
+        closed=[False]
+        def finish(save=True):
+            if closed[0]:return
+            closed[0]=True
+            new=editor.get().strip()
+            editor.destroy()
+            if not save or not new:return
+            if is_plan:
+                by_display={friendly_plan_id(k):k for k in self.plans}
+                value=by_display.get(new)
+                if not value:return
+                self.cfg["course_map"][current]["plan"]=value
+            else:
+                self.cfg["course_map"][current]["course_title"]=new
+            self.refresh_streams()
+            self.streamtree.selection_set(item)
+        editor.bind("<Return>",lambda _:finish(True))
+        editor.bind("<Escape>",lambda _:finish(False))
+        editor.bind("<FocusOut>",lambda _:finish(True))
+        editor.bind("<<ComboboxSelected>>",lambda _:finish(True))
 
     def edit_stream(self,new):
         current=None
@@ -425,16 +564,17 @@ class SchoolEditor(tk.Toplevel):
         info=self.cfg["course_map"].get(current,{})
         fields=[]
         for label,start in (("Потік за розкладом",current or ""),
-                            ("План КТП",info.get("plan","")),
+                            ("План КТП",friendly_plan_id(info.get("plan",""))),
                             ("Назва курсу Classroom",info.get("course_title",""))):
             ttk.Label(dlg,text=label).pack(anchor="w",padx=12,pady=(10,0))
             var=tk.StringVar(value=start)
             if label=="План КТП":
-                ttk.Combobox(dlg,textvariable=var,values=list(self.plans),width=65,state="readonly").pack(anchor="w",padx=12)
+                ttk.Combobox(dlg,textvariable=var,values=[friendly_plan_id(k) for k in self.plans],width=65,state="readonly").pack(anchor="w",padx=12)
             else:ttk.Entry(dlg,textvariable=var,width=72).pack(anchor="w",padx=12)
             fields.append(var)
         def apply():
-            stream,plan,course=[v.get().strip() for v in fields]
+            stream,plan_view,course=[v.get().strip() for v in fields]
+            plan=next((k for k in self.plans if friendly_plan_id(k)==plan_view),None)
             if not stream or not plan or not course:
                 messagebox.showerror("Потік","Усі три поля обов'язкові.",parent=dlg);return
             if stream in self.cfg["course_map"] and (new or stream!=current):
@@ -468,11 +608,11 @@ class SchoolEditor(tk.Toplevel):
                   font=("Segoe UI",10,"bold")).pack(anchor="w",pady=9)
         fields=ttk.Frame(tab);fields.pack(anchor="w")
         self.dates={}
-        for key,label in (("year_start","Початок року (YYYY-MM-DD)"),
+        for key,label in (("year_start","Початок року (ДД.ММ.РРРР)"),
                           ("year_end","Завершення року"),
                           ("anchor_monday","Опорний понеділок")):
             ttk.Label(fields,text=label,width=37).grid(row=len(self.dates),column=0,sticky="w",pady=5)
-            var=tk.StringVar(value=self.cfg[key]);self.dates[key]=var
+            var=tk.StringVar(value=display_ui_date(self.cfg[key]));self.dates[key]=var
             ttk.Entry(fields,textvariable=var,width=21).grid(row=len(self.dates)-1,column=1,sticky="w")
         ttk.Label(fields,text="Тип опорного тижня").grid(row=3,column=0,sticky="w")
         self.anchorphase=tk.StringVar(value=self.cfg.get("anchor_phase","чисельник"))
@@ -484,6 +624,7 @@ class SchoolEditor(tk.Toplevel):
         for col,label in (("start","Початок"),("end","Кінець")):
             self.holidays.heading(col,text=label);self.holidays.column(col,width=150)
         self.holidays.pack(anchor="w",fill="x")
+        self.holidays.bind("<Double-1>",self._inline_holiday_edit)
         buttons=ttk.Frame(tab);buttons.pack(anchor="w",pady=5)
         ttk.Button(buttons,text="+ Канікули",command=self.add_holiday).pack(side="left")
         ttk.Button(buttons,text="Видалити вибраний період",command=self.del_holiday).pack(side="left",padx=8)
@@ -616,8 +757,77 @@ class SchoolEditor(tk.Toplevel):
         except Exception as ex:
             messagebox.showerror("Word",str(ex),parent=self)
 
+    def _year_values(self):
+        parsed={}
+        for key,var in self.dates.items():
+            parsed[key]=parse_ui_date(var.get())
+        if parsed["year_start"]>parsed["year_end"]:
+            raise ValueError("Дата початку навчального року більша за дату завершення.")
+        if date.fromisoformat(parsed["anchor_monday"]).weekday()!=0:
+            raise ValueError("Опорна дата повинна припадати на понеділок.")
+        return parsed
+
+    def _inline_holiday_edit(self,event):
+        item=self.holidays.identify_row(event.y)
+        column=self.holidays.identify_column(event.x)
+        if not item or column not in ("#1","#2"):return
+        bbox=self.holidays.bbox(item,column)
+        if not bbox:return
+        x,y,w,h=bbox
+        original=self.holidays.set(item,"start" if column=="#1" else "end")
+        field=ttk.Entry(self.holidays)
+        field.insert(0,original)
+        field.place(x=x,y=y,width=w,height=h)
+        field.select_range(0,"end");field.focus_set()
+        closed=[False]
+        def finish(save=False):
+            if closed[0]:return
+            if not save:closed[0]=True;field.destroy();return
+            try:
+                iso=parse_ui_date(field.get())
+                key="start" if column=="#1" else "end"
+                changed=copy.deepcopy(self.cfg["holidays"][int(item)])
+                changed[key]=iso
+                if changed["end"]<changed["start"]:
+                    raise ValueError("Кінець канікул раніше початку.")
+            except ValueError as err:
+                messagebox.showwarning("Дата канікул",str(err),parent=self)
+                field.focus_set();return
+            closed[0]=True
+            self.cfg["holidays"][int(item)]=changed
+            field.destroy()
+            self.refresh_holidays()
+            self.holidays.selection_set(item)
+        field.bind("<Return>",lambda _:finish(True))
+        field.bind("<Escape>",lambda _:finish(False))
+        field.bind("<FocusOut>",lambda _:finish(True))
+
+    def export_schedule_jpeg(self):
+        path=filedialog.asksaveasfilename(parent=self,
+            title="Зберегти розклад як зображення JPEG",
+            defaultextension=".jpg",initialfile="Розклад уроків.jpg",
+            filetypes=[("Зображення JPEG","*.jpg *.jpeg")])
+        if not path:return
+        self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
+        self.cfg["meal_break_after"]=int(self.meal_after.get())
+        self.cfg["meal_label"]=self.meal_label.get().strip() or "ХАРЧУВАННЯ У ЇДАЛЬНІ"
+        try:
+            from .schedule_io import export_schedule_jpeg
+            export_schedule_jpeg(self.cfg,path,
+                show_bells=self.show_bells.get(),
+                show_meal=self.show_meal.get(),
+                show_numbers=self.show_numbers.get())
+            messagebox.showinfo("JPEG-розклад",
+                "Зображення розкладу готове:\\n"+path+
+                "\\n\\nЗа потреби збережіть зміни у програмі загальною кнопкою.",
+                parent=self)
+        except Exception as ex:
+            messagebox.showerror("JPEG",str(ex),parent=self)
+
     def apply_dates(self):
-        self.cfg.update({k:v.get().strip() for k,v in self.dates.items()})
+        try:self.cfg.update(self._year_values())
+        except ValueError as ex:
+            messagebox.showerror("Дати",str(ex),parent=self);return
         self.cfg["anchor_phase"]=self.anchorphase.get()
         self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
         self.cfg["meal_break_after"]=int(self.meal_after.get())
@@ -633,17 +843,18 @@ class SchoolEditor(tk.Toplevel):
           "Усі старі КТП буде позначено як «потрібна перевірка»: публікація уроків блокується до підтвердження нових КТП.\n"
           "Чернетки й вибрані Word нового року починаються з нуля.\n\n"
           "Продовжити?",parent=self):return
-        first=simpledialog.askstring("Початок року","Вкажіть новий початок YYYY-MM-DD:",parent=self)
+        first=simpledialog.askstring("Початок року","Вкажіть початок у форматі ДД.ММ.РРРР:",parent=self)
         if not first:return
-        last=simpledialog.askstring("Кінець року","Вкажіть завершення YYYY-MM-DD:",parent=self)
+        last=simpledialog.askstring("Кінець року","Вкажіть завершення у форматі ДД.ММ.РРРР:",parent=self)
         if not last:return
         try:
-            start=date.fromisoformat(first);end=date.fromisoformat(last)
+            start=date.fromisoformat(parse_ui_date(first));end=date.fromisoformat(parse_ui_date(last))
             if end<start:raise ValueError("Кінець року раніше початку")
         except ValueError as ex:messagebox.showerror("Рік",str(ex),parent=self);return
         monday=start-timedelta(days=start.weekday())
-        self.dates["year_start"].set(start.isoformat());self.dates["year_end"].set(end.isoformat())
-        self.dates["anchor_monday"].set(monday.isoformat())
+        self.dates["year_start"].set(display_ui_date(start.isoformat()))
+        self.dates["year_end"].set(display_ui_date(end.isoformat()))
+        self.dates["anchor_monday"].set(display_ui_date(monday.isoformat()))
         self.anchorphase.set("чисельник")
         self.cfg["holidays"]=[]
         for plan in self.plans.values(): plan["needs_review"]=True
@@ -657,15 +868,17 @@ class SchoolEditor(tk.Toplevel):
     def refresh_holidays(self):
         self.holidays.delete(*self.holidays.get_children())
         for i,h in enumerate(self.cfg["holidays"]):
-            self.holidays.insert("","end",iid=str(i),values=(h["start"],h["end"]))
+            self.holidays.insert("","end",iid=str(i),
+                 values=(display_ui_date(h["start"]),display_ui_date(h["end"])))
 
     def add_holiday(self):
-        a=simpledialog.askstring("Канікули","Початок YYYY-MM-DD:",parent=self)
+        a=simpledialog.askstring("Канікули","Початок у форматі ДД.ММ.РРРР:",parent=self)
         if not a:return
-        b=simpledialog.askstring("Канікули","Кінець YYYY-MM-DD:",parent=self)
+        b=simpledialog.askstring("Канікули","Кінець у форматі ДД.ММ.РРРР:",parent=self)
         if not b:return
         try:
-            if date.fromisoformat(b)<date.fromisoformat(a):
+            a,b=parse_ui_date(a),parse_ui_date(b)
+            if b<a:
                 raise ValueError("Кінець раніше початку")
         except ValueError as exc:messagebox.showerror("Канікули",str(exc),parent=self);return
         self.cfg["holidays"].append({"start":a,"end":b});self.refresh_holidays()
@@ -677,8 +890,10 @@ class SchoolEditor(tk.Toplevel):
         self.refresh_holidays()
 
     def save(self):
-        # Includes any date/time entry in fields even if user has not clicked "Застосувати ці дати".
-        self.cfg.update({k:v.get().strip() for k,v in self.dates.items()})
+        # Зберігайте ISO всередині програми, а ДД.ММ.РРРР — тільки в інтерфейсі.
+        try:self.cfg.update(self._year_values())
+        except ValueError as ex:
+            messagebox.showerror("Дати",str(ex),parent=self);return
         self.cfg["anchor_phase"]=self.anchorphase.get()
         self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
         self.cfg["meal_break_after"]=int(self.meal_after.get())

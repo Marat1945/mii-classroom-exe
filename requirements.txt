@@ -4,3 +4,5 @@ google-auth-oauthlib>=1.2,<2
 google-auth-httplib2>=0.2,<1
 openai>=1.90,<3
 keyring>=25,<27
+Pillow>=10.4,<13
+tkinterdnd2>=0.4.2,<1

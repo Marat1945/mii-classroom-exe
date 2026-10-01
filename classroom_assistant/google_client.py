@@ -51,22 +51,36 @@ def list_teacher_courses():
         if not page:break
     return [{"id":c["id"],"name":c.get("name",""),"section":c.get("section",""),"courseState":c.get("courseState","")} for c in found]
 
-def create_draft(course_id, title, description, docx_path, assignment=False):
-    """Deliberately no 'publish' method. Upload DOCX to Drive then create Classroom DRAFT."""
+def create_draft(course_id, title, description, docx_path, assignment=False, attachments=None):
+    """Усі файли в Google Drive, потім ОДНА чернетка Classroom. Публікації тут немає."""
     from googleapiclient.http import MediaFileUpload
+    import mimetypes
     classroom,drive=services()
-    path=Path(docx_path)
-    if not path.is_file():raise FileNotFoundError(str(path))
-    blob=MediaFileUpload(str(path),mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",resumable=False)
-    uploaded=drive.files().create(body={"name":path.name},media_body=blob,fields="id,webViewLink").execute()
-    shared={"driveFile":{"driveFile":{"id":uploaded["id"]},"shareMode":"VIEW"}}
+    attachments=list(attachments or [])
+    paths=[Path(docx_path)]+[Path(p) for p in attachments]
+    if len(paths)>20:
+        raise ValueError("До однієї публікації Classroom можна додати не більше 20 файлів.")
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(str(path))
+    materials=[]
+    uploaded_ids=[]
+    for path in paths:
+        guessed,_=mimetypes.guess_type(str(path))
+        mimetype=guessed or "application/octet-stream"
+        blob=MediaFileUpload(str(path),mimetype=mimetype,resumable=False)
+        uploaded=drive.files().create(
+            body={"name":path.name},media_body=blob,fields="id,webViewLink").execute()
+        uploaded_ids.append(uploaded["id"])
+        materials.append({"driveFile":{"driveFile":{"id":uploaded["id"]},"shareMode":"VIEW"}})
     if assignment:
         payload={"title":title,"description":description[:30000],
-                 "workType":"ASSIGNMENT","state":"DRAFT","materials":[shared]}
+                 "workType":"ASSIGNMENT","state":"DRAFT","materials":materials}
         result=classroom.courses().courseWork().create(courseId=str(course_id),body=payload).execute()
     else:
         payload={"title":title,"description":description[:30000],
-                 "state":"DRAFT","materials":[shared]}
+                 "state":"DRAFT","materials":materials}
         result=classroom.courses().courseWorkMaterials().create(courseId=str(course_id),body=payload).execute()
-    return {"id":result["id"],"drive_id":uploaded["id"],"course_id":course_id,
+    return {"id":result["id"],"drive_id":uploaded_ids[0],"attachment_drive_ids":uploaded_ids[1:],
+            "course_id":course_id,
             "kind":"ASSIGNMENT" if assignment else "MATERIAL","state":"DRAFT"}

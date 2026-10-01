@@ -1,12 +1,22 @@
 """Вікно локального клієнта. Нічого самовільно не публікує."""
 import threading
+import shutil
+from dataclasses import replace as dataclass_replace
 from datetime import date,timedelta,datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
-from .engine import read_json, read_state, save_state, day_lessons, week_phase, is_holiday, safe_name, html_classroom_text, DATA, ROOT
+from .engine import read_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, html_classroom_text, DATA, ROOT
 from .documents import create_word
-from .material_library import (parallel_matches,add_document,attach_document,find_for_lesson,signature_key,stream_subject,check_real_docx)
+from .material_library import (parallel_matches,add_document,attach_document,find_for_lesson,signature_key,signature,stream_subject,check_real_docx,copy_for_lesson)
+from .attachments import add_attachments, files_for_lesson, copy_attachments, remove_attachment
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    WindowBase = TkinterDnD.Tk
+except ImportError:
+    DND_FILES=None
+    WindowBase=tk.Tk
+
 
 def display_date(value):
     return date.fromisoformat(value).strftime("%d.%m.%Y")
@@ -31,10 +41,15 @@ def render_template(text,lesson):
     return out
 
 
-class MainApp(tk.Tk):
+WEEKDAYS_UA=("ПОНЕДІЛОК","ВІВТОРОК","СЕРЕДА","ЧЕТВЕР","П’ЯТНИЦЯ","СУБОТА","НЕДІЛЯ")
+
+def weekday_ua(value):
+    return WEEKDAYS_UA[parse_date(value).weekday()]
+
+class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.0")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.1")
         self.geometry("1250x770")
         self.minsize(1060,630)
         self.cfg=read_json("Налаштування.json")
@@ -50,10 +65,15 @@ class MainApp(tk.Tk):
         hdr=ttk.Frame(outer);hdr.pack(fill="x",pady=(0,8))
         ttk.Label(hdr,text="Дата (ДД.ММ.РРРР):").pack(side="left")
         self.datevar=tk.StringVar(value=date.today().strftime("%d.%m.%Y"))
-        ttk.Entry(hdr,width=14,textvariable=self.datevar).pack(side="left",padx=6)
+        self._date_refresh_id=None
+        self.datevar.trace_add("write",self._on_date_text_change)
+        date_entry=ttk.Entry(hdr,width=14,textvariable=self.datevar)
+        date_entry.pack(side="left",padx=6)
+        date_entry.bind("<Return>",lambda _:self.update_day())
+        self.weekday=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"),foreground="#245A7C",width=13)
+        self.weekday.pack(side="left",padx=(5,8))
         ttk.Button(hdr,text="←",width=4,command=lambda:self.shift(-1)).pack(side="left")
         ttk.Button(hdr,text="→",width=4,command=lambda:self.shift(1)).pack(side="left")
-        ttk.Button(hdr,text="Показати уроки",command=self.update_day).pack(side="left",padx=8)
         self.phase=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"))
         self.phase.pack(side="left",padx=15)
 
@@ -71,6 +91,7 @@ class MainApp(tk.Tk):
         sy.grid(row=0,column=1,sticky="ns");sx.grid(row=1,column=0,sticky="ew")
         table_frame.rowconfigure(0,weight=1);table_frame.columnconfigure(0,weight=1)
         self.grid.bind("<<TreeviewSelect>>",lambda _:self.select())
+        self.grid.bind("<Button-3>",self._open_lesson_menu)
 
         actions=ttk.Frame(outer);actions.pack(fill="x",pady=9)
         for title,callback in [
@@ -99,8 +120,38 @@ class MainApp(tk.Tk):
         ttk.Label(outer,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
         self.desc=tk.Text(outer,height=13,wrap="word",font=("Segoe UI",10))
         self.desc.pack(fill="both",expand=True)
+        self.attachment_toolbar=ttk.Frame(outer)
+        self.attachment_toolbar.pack(fill="x",pady=(5,2))
+        ttk.Button(self.attachment_toolbar,text="📎 Додати файли до Classroom",
+                   command=self.choose_attachments).pack(side="left",padx=(0,10))
+        self.drop_hint=ttk.Label(self.attachment_toolbar,
+              text=("Перетягніть файли сюди або в поле опису" if DND_FILES else
+                    "Для прикріплення натисніть «Додати файли»"),
+              foreground="#245A7C")
+        self.drop_hint.pack(side="left")
+        self.attachment_bar=ttk.Frame(outer)
+        self.attachment_bar.pack(fill="x",pady=(2,4))
+        self._preview_images=[]
+        if DND_FILES:
+            for widget in (self.desc,self.drop_hint,self.attachment_bar):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>",self._receive_files)
         self.foot=ttk.Label(outer,text="Без авторизації Google програма працює локально. Публікацію заборонено.",foreground="#46576b")
         self.foot.pack(anchor="w",pady=(7,0))
+
+    def _on_date_text_change(self,*_unused):
+        """Відобразити уроки після введення ПОВНОЇ правильної дати."""
+        pending=getattr(self,"_date_refresh_id",None)
+        if pending is not None:
+            self.after_cancel(pending)
+        def refresh():
+            self._date_refresh_id=None
+            try:day=parse_date(self.datevar.get())
+            except (ValueError,TypeError):return
+            if day.year<2020 or day.year>2100:return
+            if hasattr(self,"grid"):
+                self.update_day()
+        self._date_refresh_id=self.after(350,refresh)
 
     def shift(self,amount):
         try:d=parse_date(self.datevar.get())+timedelta(days=amount)
@@ -117,6 +168,7 @@ class MainApp(tk.Tk):
             messagebox.showerror("Дата або КТП",str(ex));return
         for item in self.grid.get_children():self.grid.delete(item)
         off=is_holiday(day,self.cfg)
+        self.weekday.configure(text=WEEKDAYS_UA[day.weekday()])
         self.phase.configure(text=f"{week_phase(day,self.cfg).upper()}"+(" • КАНІКУЛИ: УРОКІВ НЕМАЄ" if off else ""))
         for k,row in enumerate(self.rows):
             item=self.state.get("drafts",{}).get(row.unique_key)
@@ -126,7 +178,11 @@ class MainApp(tk.Tk):
                      ("Word потребує перевірки" if doc.get("complete") else
                       ("Word заготовка" if doc else
                        ("Немає Word" if row.status=="готово" else row.status)))))
-            self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",row.stream,row.course_title,row.lesson_number,row.topic,status))
+            adjusted=self.effective_lesson(row)
+            if row.unique_key in self.state.get("lesson_models",{}):
+                status="Зразок із паралелі · "+status
+            self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",
+                     row.stream,row.course_title,row.lesson_number,adjusted.topic,status))
         self.desc.delete("1.0","end")
         if self.rows:
             chosen=next((str(i) for i,x in enumerate(self.rows) if x.unique_key==prior),"0")
@@ -139,15 +195,24 @@ class MainApp(tk.Tk):
         selection=self.grid.selection()
         return self.rows[int(selection[0])] if selection else None
 
+    def effective_lesson(self,lesson):
+        model=self.state.get("lesson_models",{}).get(lesson.unique_key)
+        if not model:
+            return lesson
+        return dataclass_replace(lesson,topic=model.get("topic",lesson.topic),
+                                 homework=model.get("homework",lesson.homework))
+
     def select(self):
-        lesson=self.selected()
-        if not lesson:return
+        original=self.selected()
+        if not original:return
+        lesson=self.effective_lesson(original)
         self.desc.delete("1.0","end")
         description=self.state.get("description_overrides",{}).get(lesson.unique_key)
         if description is None:
             templ=self.state.get("parallel_templates",{}).get(signature_key(lesson,self.cfg))
             description=render_template(templ,lesson) if templ is not None else html_classroom_text(lesson,asynchronous=True,video=True)
         self.desc.insert("1.0",description)
+        self.refresh_attachment_previews()
         f=self.state.get("files",{}).get(lesson.unique_key,{})
         status=f"Обрано: {lesson.stream}, урок КТП №{lesson.lesson_number}. Джерело: {lesson.source_file}"
         if f: status+=f" | Word: {f['path']} | Перевірено: {f.get('validated',False)}"
@@ -291,6 +356,195 @@ class MainApp(tk.Tk):
             f"Документ прийнято в бібліотеку.\nПрив'язано до {len(targets)} уроків.\n"
             "Повторно натискати «Підтвердити Word» НЕ потрібно. "
             "Classroom не змінено.")
+
+    def _open_lesson_menu(self,event):
+        item=self.grid.identify_row(event.y)
+        if not item:return
+        self.grid.selection_set(item);self.grid.focus(item)
+        menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label="Взяти попередній урок із паралелі…",
+                         command=lambda:self.borrow_lesson("past"))
+        menu.add_command(label="Взяти майбутній урок із паралелі…",
+                         command=lambda:self.borrow_lesson("future"))
+        menu.add_separator()
+        menu.add_command(label="Вибрати готовий Word…",command=self.choose_docx)
+        menu.add_command(label="Додати файли до Classroom…",command=self.choose_attachments)
+        menu.add_command(label="Відкрити папку Word",command=self.open_folder)
+        menu.tk_popup(event.x_root,event.y_root)
+        menu.grab_release()
+
+    def borrow_lesson(self,when):
+        """Ручний вибір попереднього/майбутнього ЗРАЗКА лише в сумісному потоці."""
+        target=self.selected()
+        if not target:return
+        if target.unique_key in self.state.get("drafts",{}):
+            messagebox.showwarning("Уже є чернетка",
+                    "У Classroom для цього уроку вже створено чернетку. "
+                    "Редагуйте її безпосередньо в Classroom.");return
+        target_sig=signature(target,self.cfg)
+        candidates=[]
+        for source in build_calendar(self.cfg):
+            if source.unique_key==target.unique_key or source.status!="готово":continue
+            if when=="past" and source.day>=target.day:continue
+            if when=="future" and source.day<=target.day:continue
+            src_grade,src_subject=stream_subject(source.stream)
+            target_grade,target_subject=stream_subject(target.stream)
+            if (src_grade,src_subject)!=(target_grade,target_subject):continue
+            doc=self.state.get("files",{}).get(source.unique_key,{})
+            if not doc.get("validated") or not Path(doc.get("path","")).is_file():continue
+            candidates.append(source)
+        candidates.sort(key=lambda x:x.day,reverse=(when=="past"))
+        if not candidates:
+            messagebox.showinfo("Уроки паралелі",
+                   "Не знайдено готових перевірених Word для цього предмета, "
+                   "навчальної програми та кількості годин у відповідному періоді.")
+            return
+        win=tk.Toplevel(self)
+        win.title("Виберіть попередню роботу" if when=="past" else "Виберіть майбутню роботу")
+        win.geometry("1060x490");win.transient(self)
+        ttk.Label(win,text="Будуть перенесені тема, опис Classroom, готовий Word і вкладення. "
+                  "Дата уроку стане поточною. Автоприв'язка для різних КТП/годин заборонена; "
+                  "тут дозволяється ЛИШЕ ваш ручний вибір. КТП не змінюється.",
+                  wraplength=1000).pack(anchor="w",padx=12,pady=9)
+        frame=ttk.Frame(win);frame.pack(fill="both",expand=True,padx=10)
+        columns=("date","stream","topic")
+        table=ttk.Treeview(frame,columns=columns,show="headings")
+        for name,label,width in (("date","Дата",110),("stream","Паралель",150),
+                                 ("topic","Тема / вид роботи",750)):
+            table.heading(name,text=label);table.column(name,width=width)
+        sc=ttk.Scrollbar(frame,orient="vertical",command=table.yview)
+        table.configure(yscrollcommand=sc.set)
+        table.pack(side="left",fill="both",expand=True)
+        sc.pack(side="right",fill="y")
+        for i,x in enumerate(candidates):
+            eff=self.effective_lesson(x)
+            table.insert("", "end",iid=str(i),values=(display_date(x.day),x.stream,eff.topic[:130]))
+        table.selection_set("0")
+        def apply(_event=None):
+            choice=table.selection()
+            if not choice:return
+            original=candidates[int(choice[0])]
+            source=self.effective_lesson(original)
+            if not messagebox.askyesno("Один зразок без повторної оплати",
+                f"Використати готовий урок «{source.topic}» ({display_date(source.day)}, {source.stream}) "
+                f"для {target.stream} ({display_date(target.day)})?\n\n"
+                "Зміняться лише локальні тема, опис, Word і вкладення цього уроку. "
+                "КТП та Google Classroom залишаються без змін до створення окремої чернетки.",
+                parent=win):return
+            different_plan=signature(source,self.cfg)!=target_sig
+            if different_plan and not messagebox.askyesno(
+                "Увага: різні КТП або кількість годин",
+                "Ви вручну вибрали роботу з тієї самої паралелі, але з іншими "
+                "годинами або календарною програмою.\n\n"
+                "Перевірте відповідність теми, навчальній програмі й віку дітей. "
+                "Тільки цей один урок буде змінений. Продовжити?",
+                parent=win):return
+            model={"topic":source.topic,"homework":source.homework,
+                   "from":source.unique_key}
+            destination=dataclass_replace(target,topic=source.topic,homework=source.homework)
+            try:
+                src=self.state["files"][source.unique_key]
+                dest=copy_for_lesson(src["path"],destination)
+                raw=self.state.get("description_overrides",{}).get(source.unique_key)
+                if raw is None:
+                    templ=self.state.get("parallel_templates",{}).get(signature_key(source,self.cfg))
+                    raw=render_template(templ,source) if templ is not None else html_classroom_text(source,asynchronous=True,video=True)
+                old_date=source.day[8:10]+"."+source.day[5:7]
+                new_date=target.day[8:10]+"."+target.day[5:7]
+                text=raw.replace(old_date,new_date)
+                copy_attachments(self.state,source.unique_key,target.unique_key)
+            except Exception as ex:
+                messagebox.showerror("Не вдалося перенести",str(ex),parent=win);return
+            self.state.setdefault("lesson_models",{})[target.unique_key]=model
+            self.state.setdefault("description_overrides",{})[target.unique_key]=text
+            self.state.setdefault("files",{})[target.unique_key]={
+                "path":str(dest),"complete":True,"validated":True,
+                "borrowed_from":source.unique_key}
+            save_state(self.state);win.destroy();self.update_day()
+            messagebox.showinfo("Урок використано","Готовий Word та опис перенесено без AI-запиту. "
+                    "Перевірте дату, тему й Д/з перед створенням чернетки.")
+        table.bind("<Double-1>",apply)
+        ttk.Button(win,text="Використати вибраний урок",
+                   command=apply).pack(pady=8)
+
+    def _receive_files(self,event):
+        try:
+            names=list(self.tk.splitlist(event.data))
+        except Exception:
+            names=[]
+        self._attach_paths(names)
+        return "break"
+
+    def choose_attachments(self):
+        if not self.selected():return
+        paths=filedialog.askopenfilenames(
+            title="Виберіть файли для додавання в Classroom (максимум 19)",
+            filetypes=[("Усі файли","*.*")])
+        self._attach_paths(paths)
+
+    def _attach_paths(self,paths):
+        lesson=self.selected()
+        if not lesson or not paths:return
+        if lesson.unique_key in self.state.get("drafts",{}):
+            messagebox.showwarning("Уже створено чернетку",
+              "Вкладення до наявної чернетки слід додати в Google Classroom.");return
+        try:
+            added=add_attachments(self.state,lesson.unique_key,paths)
+        except Exception as ex:
+            messagebox.showerror("Файли",str(ex));return
+        save_state(self.state);self.refresh_attachment_previews()
+        if added:self.foot.config(text=f"Прикріплено додаткових файлів: "
+                  f"{len(self.state.get('attachments',{}).get(lesson.unique_key,[]))} "
+                  "· вони ще НЕ надіслані в Google.")
+
+    def refresh_attachment_previews(self):
+        if not hasattr(self,"attachment_bar"):return
+        for child in self.attachment_bar.winfo_children():child.destroy()
+        self._preview_images=[]
+        lesson=self.selected()
+        if not lesson:return
+        attachments=self.state.get("attachments",{}).get(lesson.unique_key,[])
+        if not attachments:
+            ttk.Label(self.attachment_bar,text="Вкладень поки немає.",
+                      foreground="#617081").pack(anchor="w")
+            return
+        # Horizontal scroll for many photo cards.
+        canvas=tk.Canvas(self.attachment_bar,height=93,highlightthickness=0)
+        scroll=ttk.Scrollbar(self.attachment_bar,orient="horizontal",command=canvas.xview)
+        canvas.configure(xscrollcommand=scroll.set)
+        canvas.pack(fill="x",expand=True)
+        scroll.pack(fill="x")
+        inside=ttk.Frame(canvas)
+        canvas.create_window((0,0),window=inside,anchor="nw")
+        inside.bind("<Configure>",lambda _:canvas.configure(scrollregion=canvas.bbox("all")))
+        for ix,entry in enumerate(attachments):
+            part=ttk.Frame(inside,relief="groove",borderwidth=1,padding=3)
+            part.grid(row=0,column=ix,padx=3,sticky="nw")
+            suffix=Path(entry["path"]).suffix.lower()
+            if suffix in (".png",".jpg",".jpeg",".gif",".bmp",".webp"):
+                try:
+                    from PIL import Image,ImageTk
+                    with Image.open(entry["path"]) as original:
+                        picture=original.copy()
+                    picture.thumbnail((87,53))
+                    photo=ImageTk.PhotoImage(picture,master=self)
+                    self._preview_images.append(photo)
+                    ttk.Label(part,image=photo).pack(side="left",padx=3)
+                except Exception:pass
+            name=entry.get("name",Path(entry["path"]).name)
+            ttk.Label(part,text=name[:30],width=27).pack(side="left")
+            ttk.Button(part,text="×",width=3,
+                       command=lambda j=ix:self.remove_attachment_at(j)).pack(side="right")
+
+    def remove_attachment_at(self,index):
+        lesson=self.selected()
+        if not lesson:return
+        if lesson.unique_key in self.state.get("drafts",{}):
+            messagebox.showwarning("Чернетка існує",
+               "Файли вже прив'язані до чернетки Google. Видалення виконуйте в Classroom.")
+            return
+        if remove_attachment(self.state,lesson.unique_key,index):
+            save_state(self.state);self.refresh_attachment_previews()
 
     def library_dialog(self):
         from .material_library import load_index,signature,norm
@@ -501,8 +755,9 @@ class MainApp(tk.Tk):
         ttk.Button(dialog,text="Зберегти зіставлення",command=save).pack(pady=9)
 
     def draft(self):
-        lesson=self.selected()
-        if not lesson:return
+        original=self.selected()
+        if not original:return
+        lesson=self.effective_lesson(original)
         if lesson.status!="готово":
             messagebox.showerror("КТП","Цей урок не готовий: спочатку імпортуйте та перевірте календарний план поточного року.")
             return
@@ -517,9 +772,11 @@ class MainApp(tk.Tk):
             messagebox.showerror("Classroom","Цей курс ще не зіставлено з Google Classroom.");return
         text=self.desc.get("1.0","end").strip()
         assignment=self.assignment.get()
+        attachment_paths=files_for_lesson(self.state,key)
         confirm=("Створити ТІЛЬКИ ЧЕРНЕТКУ?\n\n"
                  f"Курс: {lesson.course_title}\nДата уроку: {lesson.day}\n"
-                 f"Тема: {lesson.topic[:110]}\n\n"
+                 f"Тема: {lesson.topic[:110]}\n"
+                 f"Додаткові вкладення: {len(attachment_paths)}\n\n"
                  "Відео потрібно додати вручну перед публікацією.")
         if not messagebox.askyesno("Підтвердження",confirm):return
         def task():
@@ -527,7 +784,7 @@ class MainApp(tk.Tk):
             return create_draft(course_id,
                 f"Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}. "
                 "(Асинхронно — без виходу у Zoom у зв’язку з довготривалою повітряною тривогою і загрозою для життя і здоров’я)",
-                 text,f["path"],assignment)
+                 text,f["path"],assignment,attachment_paths)
         def done(result):
             self.state.setdefault("drafts",{})[key]=result
             save_state(self.state);self.update_day()
