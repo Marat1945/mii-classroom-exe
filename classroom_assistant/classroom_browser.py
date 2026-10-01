@@ -14,6 +14,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .classroom_archive import compatible_classroom_title
+from .window_ui import maximize_work_window
 
 
 class ClassroomViewer(tk.Toplevel):
@@ -21,7 +22,7 @@ class ClassroomViewer(tk.Toplevel):
         super().__init__(parent)
         self.parent=parent
         self.title("МІЙ CLASSROOM • Перегляд матеріалів і чернеток")
-        self.geometry("1200x780")
+        maximize_work_window(self)
         self.minsize(850,620)
         self.records=[]
         self.visible=[]
@@ -30,6 +31,12 @@ class ClassroomViewer(tk.Toplevel):
         self.current=None
         self._build()
         self._courses_from_local()
+        # Користувач просив ОДНУ кнопку: відкрили «Мій Classroom» —
+        # одразу читаємо обраний курс, без окремого «Оновити».
+        if self.current:
+            self.after(180,self.sync)
+        else:
+            self.after(180,self.load_courses)
         self.protocol("WM_DELETE_WINDOW",self.destroy)
         self.transient(parent)
 
@@ -42,13 +49,14 @@ class ClassroomViewer(tk.Toplevel):
         self.combo=ttk.Combobox(top,textvariable=self.course_label,state="readonly",width=46)
         self.combo.grid(row=1,column=1,sticky="w",padx=(0,9))
         self.combo.bind("<<ComboboxSelected>>",lambda _:self._course_changed())
-        self.fetch_button=ttk.Button(top,text="ОНОВИТИ З CLASSROOM",
+        self.fetch_button=ttk.Button(top,text="ОНОВЛЮЄТЬСЯ АВТОМАТИЧНО",
                                      command=self.sync)
-        self.fetch_button.grid(row=1,column=2,padx=(0,8))
-        ttk.Button(top,text="Одержати всі курси",command=self.load_courses).grid(row=1,column=3,padx=(0,8))
+        # Кнопка не відображається: оновлення автоматичне при відкритті
+        # вікна і виборі іншого курсу.
+        ttk.Button(top,text="Одержати всі курси",command=self.load_courses).grid(row=1,column=2,padx=(0,8))
         self.with_news=tk.BooleanVar(value=False)
         ttk.Checkbutton(top,text="Оголошення (окремий дозвіл)",
-                        variable=self.with_news).grid(row=1,column=4,sticky="w")
+                        variable=self.with_news).grid(row=1,column=3,sticky="w")
         filters=ttk.Frame(self,padding=(10,0,10,5));filters.pack(fill="x")
         ttk.Label(filters,text="Статус:").pack(side="left")
         self.status=tk.StringVar(value="Усі")
@@ -67,6 +75,7 @@ class ClassroomViewer(tk.Toplevel):
         search=ttk.Entry(filters,textvariable=self.keyword,width=37)
         search.pack(side="left",padx=6,fill="x",expand=True)
         self.keyword.trace_add("write",lambda *_:self.refresh_list())
+        self.with_news.trace_add("write",lambda *_:self._schedule_synced())
 
         middle=ttk.Frame(self,padding=(10,3,10,0))
         middle.pack(fill="both",expand=True)
@@ -84,6 +93,9 @@ class ClassroomViewer(tk.Toplevel):
         self.table.pack(side="left",fill="both",expand=True)
         scroll.pack(side="right",fill="y")
         self.table.bind("<<TreeviewSelect>>",lambda _:self.show_item())
+        self.table.bind("<Button-3>",self._record_context_menu)
+        self.table.bind("<Control-c>",lambda e:self.copy_current_record())
+        self.table.bind("<Delete>",lambda e:self._read_only_delete())
         detail=ttk.LabelFrame(self,text="Повний опис обраного запису",padding=8)
         detail.pack(fill="both",expand=True,padx=10,pady=(6,0))
         self.detail=tk.Text(detail,height=9,wrap="word",font=("Segoe UI",10))
@@ -111,7 +123,7 @@ class ClassroomViewer(tk.Toplevel):
         ttk.Label(attachments,text="Опис і назви вкладень видно тут. "
            "Сам файл відкриється окремо, якщо Google дозволяє доступ.",
            foreground="#355975").pack(side="bottom",anchor="w",pady=(4,0))
-        self.notice=tk.StringVar(value="Для початку виберіть курс та натисніть «ОНОВИТИ З CLASSROOM».")
+        self.notice=tk.StringVar(value="Матеріали завантажуються автоматично з вибраного курсу.")
         ttk.Label(self,textvariable=self.notice,foreground="#245574",
                  wraplength=1100).pack(anchor="w",padx=12,pady=(1,8))
 
@@ -161,7 +173,12 @@ class ClassroomViewer(tk.Toplevel):
         self.records=list(getattr(self.parent,"remote_classroom_entries",{}).get(
             self.current,[]))
         self.refresh_list()
-        self.notice.set("Відкрийте попередньо завантажений список або натисніть «ОНОВИТИ З CLASSROOM».")
+        self.notice.set("Одержую актуальні матеріали з вибраного курсу…")
+        self.after(60,self.sync)
+
+    def _schedule_synced(self):
+        if self.current and not self.busy:
+            self.after(100,self.sync)
 
     def _busy(self,yes,msg):
         self.busy=yes
@@ -185,8 +202,8 @@ class ClassroomViewer(tk.Toplevel):
         if not self.winfo_exists():return
         self.parent.google_courses=items
         self._set_courses(items)
-        self._busy(False,f"Отримано курсів: {len(items)}. Оберіть курс і натисніть «ОНОВИТИ».")
-        if self.courses:self.sync()
+        self._busy(False,f"Отримано курсів: {len(items)}. Дані завантажуються автоматично.")
+        if self.courses:self.after(80,self.sync)
 
     def sync(self):
         if self.busy:return
@@ -225,6 +242,10 @@ class ClassroomViewer(tk.Toplevel):
         if self.current==course_id:
             self.records=posts
             self.refresh_list()
+        else:
+            # Якщо вчитель перемкнув курс під час завантаження,
+            # після закінчення першого одразу завантажити новий.
+            self.after(80,self.sync)
         # main list can now display status from remote Classroom, but never
         # changes local stored draft IDs or their documented validation.
         self.parent.update_day()
@@ -330,6 +351,37 @@ class ClassroomViewer(tk.Toplevel):
         photo=ImageTk.PhotoImage(picture,master=self)
         self.thumbnail_ref=photo
         self.thumbnail.configure(image=photo,text="")
+
+    def _record_context_menu(self,event):
+        item=self.table.identify_row(event.y)
+        if item:self.table.selection_set(item);self.show_item()
+        menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label="Копіювати назву і опис (Ctrl+C)",
+                         command=self.copy_current_record)
+        menu.add_command(label="Відкрити запис у Classroom",
+                         command=self.open_original)
+        menu.add_separator()
+        menu.add_command(label="Видалити запис (лише на сайті Classroom)",
+                         command=self._read_only_delete)
+        menu.tk_popup(event.x_root,event.y_root)
+        menu.grab_release()
+
+    def copy_current_record(self):
+        record=self._current_record()
+        if not record:return "break"
+        self.clipboard_clear()
+        self.clipboard_append(
+            f"{record['title']}\n{record['state_ua']}\n"
+            f"{record['description']}")
+        return "break"
+
+    def _read_only_delete(self):
+        messagebox.showinfo("Перегляд лише для читання",
+            "Це справжній запис Google Classroom. Щоб уникнути "
+            "випадкового знищення завдань учнів, видалення тут "
+            "не виконується. Скористайтеся Classroom, якщо "
+            "потрібно видалити опублікований матеріал.",parent=self)
+        return "break"
 
     def _current_record(self):
         selected=self.table.selection()

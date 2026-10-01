@@ -123,6 +123,88 @@ def extract_lessons(rows: list[list[str]], topic_col: int, hw_col: int,
     return result
 
 
+
+# Дата джерела КТП має пріоритет у візуальному відображенні. Це НЕ змінює
+# розклад, тижневу парність або фактично призначений урок у Google.
+DATE_PATTERN=re.compile(
+    r"(?<!\d)(?P<day>0?[1-9]|[12]\d|3[01])[./](?P<month>0?[1-9]|1[012])"
+    r"(?:[./](?P<year>(?:20)?\d{2}))?[.]?(?!\d)"
+)
+CLASS_DATE_PATTERN=re.compile(
+    r"(?<!\d)(?P<klass>(?:[5-9]|10|11)\s*[-–]\s*[А-ЯІЇЄҐA-Z])"
+    r"\s*[:\-–]?\s*(?P<day>0?[1-9]|[12]\d|3[01])[./]"
+    r"(?P<month>0?[1-9]|1[012])(?:[./](?P<year>(?:20)?\d{2}))?",
+    re.IGNORECASE
+)
+
+
+def source_date_iso(day,month,year=None,academic_start=2026):
+    """01.09 → 2026-09-01; 01.02 → 2027-02-01."""
+    mon=int(month)
+    if year:
+        yr=int(year)
+        if yr<100:yr+=2000
+    else:yr=academic_start+int(mon<=7)
+    try:return date(yr,mon,int(day)).isoformat()
+    except ValueError:return None
+
+
+def parse_source_dates(value,academic_start=2026):
+    """Підтримує «8-Б 04.09. / 8-В 04.09. / 8-Г 03.09.» і «07.09.»."""
+    text=str(value or "")
+    matches=list(CLASS_DATE_PATTERN.finditer(text))
+    found={}
+    for match in matches:
+        g=match.groupdict()
+        klass=re.sub(r"\s*[-–]\s*","-",g["klass"].upper())
+        day=source_date_iso(g["day"],g["month"],g["year"],academic_start)
+        if day:found[klass]=day
+    if found:return found
+    # Unlabelled date only when not a multi-grade text fragment.
+    candidate=DATE_PATTERN.search(text)
+    if candidate:
+        g=candidate.groupdict()
+        day=source_date_iso(g["day"],g["month"],g["year"],academic_start)
+        if day:return {"*":day}
+    return {}
+
+
+def import_source_dates(rows,lessons,topic_col,number_col,academic_start=2026):
+    """Збагачує ІСНУЮЧІ записи даними з DOCX. Клас/дата — тільки з документа."""
+    if not lessons:return lessons
+    headers=next((row for row in rows[:12]
+                  if any("тема" in tidy(cell).casefold() or "зміст" in tidy(cell).casefold()
+                         for cell in row)),rows[0] if rows else [])
+    date_columns=[i for i,x in enumerate(headers) if "дата" in tidy(x).casefold()]
+    by_number={r["index"]:r for r in lessons}
+    for raw in rows:
+        if len(raw)<=max(topic_col,number_col):continue
+        matched=NUMBER.fullmatch(tidy(raw[number_col]))
+        if not matched:continue
+        lesson=by_number.get(int(matched.group(1)))
+        if not lesson or tidy(lesson["topic"])!=tidy(raw[topic_col]):continue
+        columns=date_columns or [
+            col for col in range(len(raw)) if col not in (topic_col,number_col)
+            and any(ch.isdigit() for ch in raw[col])
+        ]
+        found={}
+        for col in columns:
+            if col>=len(raw):continue
+            parsed=parse_source_dates(raw[col],academic_start)
+            for key,value in parsed.items():found.setdefault(key,value)
+        if found:lesson["source_dates"]=found
+    return lessons
+
+
+def source_date_for_stream(lesson,stream):
+    """«8-Б ІУ» → «8-Б»; без позначення класу * для всіх."""
+    dates=lesson.get("source_dates") or {}
+    klass=re.match(r"^(\d{1,2}\s*[-–]\s*[А-ЯІЇЄҐA-Z])",stream.strip(),re.IGNORECASE)
+    if klass:
+        key=re.sub(r"\s*[-–]\s*","-",klass.group(1).upper())
+        if key in dates:return dates[key]
+    return dates.get("*")
+
 def validate_working(config: dict, plans: dict) -> list[str]:
     problems=[]
     try:
