@@ -42,7 +42,8 @@ def week_phase(day: date, config=None):
     anchor = iso_day(config["anchor_monday"])
     # Python floor division supports negative weeks correctly; NEVER freeze during vacations.
     weeks=(day - timedelta(days=day.weekday())-anchor).days // 7
-    return "чисельник" if weeks % 2 == 0 else "знаменник"
+    anchor_phase=config.get("anchor_phase","чисельник")
+    return anchor_phase if weeks % 2 == 0 else ("знаменник" if anchor_phase=="чисельник" else "чисельник")
 
 def is_holiday(day: date, config=None):
     config=config or read_json("Налаштування.json")
@@ -91,8 +92,13 @@ def build_calendar(config=None, plans=None, until=None):
                 plan_id=meta["plan"]
                 counts[stream]=counts.get(stream,0)+1
                 row_index=counts[stream]-1
-                entries=plans[plan_id]["lessons"]
-                if row_index>=len(entries):
+                plan=plans[plan_id]
+                entries=plan["lessons"]
+                if plan.get("needs_review",False):
+                    topic="КТП попереднього року: потрібне підтвердження або імпорт нового плану"
+                    hw=""
+                    status="потрібен КТП нового року"
+                elif row_index>=len(entries):
                     topic="Немає наступної теми у КТП — перевірте план"
                     hw=""
                     status="вичерпано КТП"
@@ -114,7 +120,7 @@ def check_configuration(config=None,plans=None):
     plans=plans or read_json("Календарні плани.json")
     warnings=[]
     for day, periods in config["days"].items():
-        if len(periods)!=7: warnings.append(f"День {day}: не 7 уроків")
+        if len(periods)!=len(config["period_times"]): warnings.append(f"День {day}: число уроків не збігається з налаштуванням дзвоників")
         for num, pair in enumerate(periods,1):
             for stream in pair:
                 if stream and stream not in config["course_map"]:

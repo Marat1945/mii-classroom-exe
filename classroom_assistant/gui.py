@@ -1,16 +1,40 @@
 """Вікно локального клієнта. Нічого самовільно не публікує."""
 import threading
-from datetime import date,timedelta
+from datetime import date,timedelta,datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from .engine import read_json, read_state, save_state, day_lessons, week_phase, is_holiday, safe_name, html_classroom_text, DATA, ROOT
 from .documents import create_word
+from .material_library import (parallel_matches,add_document,attach_document,find_for_lesson,signature_key,stream_subject,check_real_docx)
+
+def display_date(value):
+    return date.fromisoformat(value).strftime("%d.%m.%Y")
+
+def parse_date(value):
+    value=value.strip()
+    if "." in value:return datetime.strptime(value,"%d.%m.%Y").date()
+    return date.fromisoformat(value)
+
+def topic_template(text,lesson):
+    """Перетворюємо особисті дати/тему/ДЗ в параметризований шаблон."""
+    ddmm=lesson.day[8:10]+"."+lesson.day[5:7]
+    text=text.replace(lesson.topic,"{topic}").replace(lesson.homework,"{homework}") if lesson.homework else text.replace(lesson.topic,"{topic}")
+    text=text.replace(ddmm,"{date}")
+    return text
+
+def render_template(text,lesson):
+    ddmm=lesson.day[8:10]+"."+lesson.day[5:7]
+    out=str(text)
+    for key,value in [("{date}",ddmm),("{topic}",lesson.topic),("{homework}",lesson.homework or "не зазначено у КТП"),("{stream}",lesson.stream)]:
+        out=out.replace(key,value)
+    return out
+
 
 class MainApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • 2026–2027")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.0")
         self.geometry("1250x770")
         self.minsize(1060,630)
         self.cfg=read_json("Налаштування.json")
@@ -24,8 +48,8 @@ class MainApp(tk.Tk):
         outer=ttk.Frame(self,padding=12)
         outer.pack(fill="both",expand=True)
         hdr=ttk.Frame(outer);hdr.pack(fill="x",pady=(0,8))
-        ttk.Label(hdr,text="Дата (РРРР-ММ-ДД):").pack(side="left")
-        self.datevar=tk.StringVar(value=date.today().isoformat())
+        ttk.Label(hdr,text="Дата (ДД.ММ.РРРР):").pack(side="left")
+        self.datevar=tk.StringVar(value=date.today().strftime("%d.%m.%Y"))
         ttk.Entry(hdr,width=14,textvariable=self.datevar).pack(side="left",padx=6)
         ttk.Button(hdr,text="←",width=4,command=lambda:self.shift(-1)).pack(side="left")
         ttk.Button(hdr,text="→",width=4,command=lambda:self.shift(1)).pack(side="left")
@@ -54,7 +78,7 @@ class MainApp(tk.Tk):
             ("Word: повна AI-лекція",lambda:self.make_word(True)),
             ("ВСІ Word за день (AI)",self.batch_ai),
             ("Вибрати готовий Word",self.choose_docx),
-            ("Підтвердити Word",self.validate_docx),
+            ("Бібліотека Word",self.library_dialog),
             ("Папка Word",self.open_folder),
         ]:
             ttk.Button(actions,text=title,command=callback).pack(side="left",padx=3)
@@ -63,9 +87,15 @@ class MainApp(tk.Tk):
         ttk.Button(actions2,text="Підключити Google / одержати курси",command=self.get_courses).pack(side="left",padx=3)
         ttk.Button(actions2,text="Зіставити курси",command=self.map_courses).pack(side="left",padx=3)
         ttk.Button(actions2,text="Копіювати повідомлення",command=self.copy_classroom).pack(side="left",padx=3)
+        ttk.Button(actions2,text="Зберегти опис уроку",command=self.save_classroom_description).pack(side="left",padx=3)
+        ttk.Button(actions2,text="Зберегти шаблон паралелі",command=self.save_parallel_description).pack(side="left",padx=3)
         self.assignment=tk.BooleanVar(value=False)
         ttk.Checkbutton(actions2,text="Це завдання для здавання (не матеріал)",variable=self.assignment).pack(side="left",padx=8)
         ttk.Button(actions2,text="Створити ЧЕРНЕТКУ в Classroom",command=self.draft).pack(side="right",padx=3)
+        actions3=ttk.Frame(outer);actions3.pack(fill="x",pady=3)
+        ttk.Button(actions3,text="РЕДАКТОР КТП, РОЗКЛАДУ І НАВЧАЛЬНОГО РОКУ",command=self.edit_academic_year).pack(side="left",padx=3)
+        ttk.Button(actions3,text="❓ ДОВІДКА",command=self.show_help).pack(side="right",padx=4)
+        ttk.Label(actions3,text="Плани • розклад • бібліотека • дзвоники • допомога").pack(side="left",padx=10)
         ttk.Label(outer,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
         self.desc=tk.Text(outer,height=13,wrap="word",font=("Segoe UI",10))
         self.desc.pack(fill="both",expand=True)
@@ -73,15 +103,15 @@ class MainApp(tk.Tk):
         self.foot.pack(anchor="w",pady=(7,0))
 
     def shift(self,amount):
-        try:d=date.fromisoformat(self.datevar.get().strip())+timedelta(days=amount)
+        try:d=parse_date(self.datevar.get())+timedelta(days=amount)
         except ValueError:d=date.today()
-        self.datevar.set(d.isoformat())
+        self.datevar.set(d.strftime("%d.%m.%Y"))
         self.update_day()
 
     def update_day(self):
         prior=self.selected().unique_key if getattr(self,"rows",None) and self.grid.selection() else None
         try:
-            day=date.fromisoformat(self.datevar.get().strip())
+            day=parse_date(self.datevar.get())
             self.rows=day_lessons(day.isoformat(),self.cfg)
         except Exception as ex:
             messagebox.showerror("Дата або КТП",str(ex));return
@@ -91,7 +121,11 @@ class MainApp(tk.Tk):
         for k,row in enumerate(self.rows):
             item=self.state.get("drafts",{}).get(row.unique_key)
             doc=self.state.get("files",{}).get(row.unique_key,{})
-            status="Чернетка Google" if item else ("Word перевірено" if doc.get("validated") else ("Word заготовка" if doc else row.status))
+            status=("Чернетка Google" if item else
+                    ("Готовий Word" if doc.get("validated") else
+                     ("Word потребує перевірки" if doc.get("complete") else
+                      ("Word заготовка" if doc else
+                       ("Немає Word" if row.status=="готово" else row.status)))))
             self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",row.stream,row.course_title,row.lesson_number,row.topic,status))
         self.desc.delete("1.0","end")
         if self.rows:
@@ -109,7 +143,11 @@ class MainApp(tk.Tk):
         lesson=self.selected()
         if not lesson:return
         self.desc.delete("1.0","end")
-        self.desc.insert("1.0",html_classroom_text(lesson,asynchronous=True,video=True))
+        description=self.state.get("description_overrides",{}).get(lesson.unique_key)
+        if description is None:
+            templ=self.state.get("parallel_templates",{}).get(signature_key(lesson,self.cfg))
+            description=render_template(templ,lesson) if templ is not None else html_classroom_text(lesson,asynchronous=True,video=True)
+        self.desc.insert("1.0",description)
         f=self.state.get("files",{}).get(lesson.unique_key,{})
         status=f"Обрано: {lesson.stream}, урок КТП №{lesson.lesson_number}. Джерело: {lesson.source_file}"
         if f: status+=f" | Word: {f['path']} | Перевірено: {f.get('validated',False)}"
@@ -131,13 +169,47 @@ class MainApp(tk.Tk):
         if error:messagebox.showerror("Помилка",error)
         else:callback(result)
 
+    def _parallel(self,lesson):
+        return parallel_matches(lesson,self.cfg)
+
+    def _attach_from_master(self,master,lesson,origin,replace_existing=False):
+        selected=self._parallel(lesson)
+        item=add_document(master,lesson,self.cfg,origin=origin)
+        attached=attach_document(item,selected,self.state,replace_existing=replace_existing)
+        save_state(self.state)
+        self.update_day()
+        return attached
+
+    def _parallel_prompt(self,lesson,verb):
+        targets=self._parallel(lesson)
+        lines=[f"• {x.stream} — {display_date(x.day)} (№{x.lesson_number})" for x in targets]
+        shown="\n".join(lines[:18])
+        if len(lines)>18:shown+=f"\n... ще {len(lines)-18} уроків"
+        return messagebox.askyesno("Єдина лекція для паралелі",
+            f"{verb}\n\nАвтоматична прив'язка до сумісної паралелі:\n{shown}\n\n"
+            "Перевірте, що лекція повна, тема правильна, а дати/Д/з оновлено.\n"
+            "Для відмінної програми або кількості годин перенесення НЕ виконується.\n"
+            "Google Classroom НЕ буде опубліковано автоматично.")
+
     def make_word(self,with_ai):
         lesson=self.selected()
         if not lesson:return
         if lesson.status!="готово":
-            messagebox.showerror("КТП", "Теми у КТП завершилися. Уточніть план.");return
-        folder=ROOT/"Готові Word"/lesson.day
-        destination=folder/safe_name(lesson)
+            messagebox.showerror("КТП","Теми в КТП завершилися або план не перевірено.");return
+        if with_ai:
+            reusable=find_for_lesson(lesson,self.cfg)
+            if reusable is not None:
+                if messagebox.askyesno("Економія API","У бібліотеці вже є відповідна лекція.\n\nВикористати її без платного AI-запиту?"):
+                    attached=attach_document(reusable,self._parallel(lesson),self.state)
+                    save_state(self.state);self.update_day()
+                    messagebox.showinfo("Безкоштовне повторне використання",f"Прив'язано уроків: {len(attached)}.")
+                    return
+            if not self._parallel_prompt(lesson,"Створити ОДНУ платну AI-лекцію?"):
+                return
+        else:
+            if not messagebox.askyesno("Word-заготовка","Створити ТІЛЬКИ порожню заготовку? Учням її надсилати НЕ можна."):
+                return
+        destination=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
         def task():
             material=None
             if with_ai:
@@ -145,56 +217,107 @@ class MainApp(tk.Tk):
                 material=generate_full_lesson(lesson,self.cfg.get("ai_model","gpt-5"))
             return create_word(lesson,destination,material)
         def done(path):
-            self.state.setdefault("files",{})[lesson.unique_key]={"path":str(path),"validated":False,"complete":with_ai}
-            save_state(self.state);self.update_day()
-            messagebox.showinfo("Створено",f"{path}\n\nПерегляньте Word і натисніть «Підтвердити Word».\nAI-матеріал також потребує перевірки.")
+            if with_ai:
+                attached=self._attach_from_master(path,lesson,"AI")
+                messagebox.showinfo("AI-лекція готова",
+                    f"Лекцію збережено в бібліотеці й автоматично прив'язано до {len(attached)} сумісних уроків.\n"
+                    "У Classroom поки нічого не створено. Перевірте всі дати, історичні факти й Д/з "
+                    "перед створенням чернеток.")
+            else:
+                self.state.setdefault("files",{})[lesson.unique_key]={
+                    "path":str(path),"validated":False,"complete":False}
+                save_state(self.state);self.update_day()
+                messagebox.showwarning("Word-заготовка","Це НЕ готова лекція. Не надсилайте її учням.")
         self.worker(task,done)
 
     def batch_ai(self):
-        """Generate all complete drafts locally; NEVER publish to Classroom."""
-        lessons=list(self.rows)
+        lessons=[i for i in self.rows if i.status=="готово"]
         if not lessons:
-            messagebox.showinfo("Розклад","На вибрану дату уроків немає.")
+            messagebox.showinfo("Розклад","На цю дату немає уроків із перевіреними КТП.");return
+        pending=[]
+        seen=set()
+        for lesson in lessons:
+            key=(signature_key(lesson,self.cfg),lesson.lesson_number,
+                 lesson.topic.casefold().strip())
+            if lesson.unique_key in self.state.get("files",{}) or key in seen:
+                continue
+            seen.add(key);pending.append(lesson)
+        if not pending:
+            messagebox.showinfo("Економія API","Усі обрані уроки вже мають Word. Повторної оплати не потрібно.")
             return
-        count=sum(i.status=="готово" for i in lessons)
-        if not count:
-            messagebox.showwarning("КТП","Немає наступних тем у календарних планах.")
+        if not messagebox.askyesno("Пакетна генерація",
+              f"Максимум {len(pending)} AI-запитів. Спершу програма повторно використає те, "
+              "що є у бібліотеці.\n\nПісля генерації одна лекція підійде тільки "
+              "сумісним класам із тією ж темою, програмою та годинами.\nПродовжити?"):
             return
-        prompt=(f"Підготувати {count} повних Word-лекцій на {self.datevar.get()}?\\n\\n"
-                "Кожна лекція звернеться до платного OpenAI API. "
-                "Файли НЕ підуть у Classroom автоматично. "
-                "Перед створенням чернеток необхідно перевірити всі тексти.\\n\\n"
-                "Натисніть «Так» лише якщо налаштували AI-ключ і згодні на витрати API.")
-        if not messagebox.askyesno("Пакетна підготовка",prompt):return
         def task():
+            made=[]
             from .ai_writer import generate_full_lesson
-            result=[]
-            for item in lessons:
-                if item.status!="готово":continue
-                destination=ROOT/"Готові Word"/item.day/safe_name(item)
-                material=generate_full_lesson(item,self.cfg.get("ai_model","gpt-5"))
-                result.append((item.unique_key,str(create_word(item,destination,material))))
-            return result
+            for lesson in pending:
+                existing=find_for_lesson(lesson,self.cfg)
+                if existing is not None:
+                    made.append((lesson,existing))
+                    continue
+                material=generate_full_lesson(lesson,self.cfg.get("ai_model","gpt-5"))
+                destination=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
+                path=create_word(lesson,destination,material)
+                item=add_document(path,lesson,self.cfg,origin="AI")
+                made.append((lesson,item))
+            return made
         def done(items):
-            for key,path in items:
-                self.state.setdefault("files",{})[key]={
-                    "path":path,"validated":False,"complete":True
-                }
-            save_state(self.state)
-            self.update_day()
-            messagebox.showinfo("Підготовка завершена",
-                f"Створено {len(items)} Word-лекцій.\\n"
-                "Відкрийте папку Word, перевірте кожну лекцію й підтвердьте перед Classroom.")
+            n=0
+            for lesson,item in items:
+                n+=len(attach_document(item,self._parallel(lesson),self.state))
+            save_state(self.state);self.update_day()
+            messagebox.showinfo("Пакетна підготовка",
+                f"Опрацьовано тематичних груп: {len(items)}. Прив'язок: {n}.\n"
+                "Перед створенням чернеток відкрийте Word і перевірте вміст.")
         self.worker(task,done)
 
     def choose_docx(self):
         lesson=self.selected()
         if not lesson:return
-        path=filedialog.askopenfilename(title="Виберіть ГОТОВИЙ перевірений Word",filetypes=[("Word файли","*.docx")])
+        path=filedialog.askopenfilename(title="Виберіть ГОТОВИЙ ПОВНИЙ Word (.docx)",
+                                        filetypes=[("Word","*.docx")])
         if not path:return
-        self.state.setdefault("files",{})[lesson.unique_key]={"path":path,"validated":False,"complete":True}
-        save_state(self.state);self.update_day()
-        messagebox.showinfo("Word обрано","Word прив'язано до уроку. Після перевірки натисніть «Підтвердити Word».")
+        try:check_real_docx(path)
+        except Exception as ex:
+            messagebox.showerror("Неправильний Word",str(ex));return
+        if not self._parallel_prompt(lesson,"Вибрано ваш готовий Word. Вважаєте його перевіреним і бажаєте прив'язати?"):
+            return
+        try:targets=self._attach_from_master(path,lesson,"власний Word",replace_existing=True)
+        except Exception as ex:messagebox.showerror("Word",str(ex));return
+        messagebox.showinfo("Word готовий",
+            f"Документ прийнято в бібліотеку.\nПрив'язано до {len(targets)} уроків.\n"
+            "Повторно натискати «Підтвердити Word» НЕ потрібно. "
+            "Classroom не змінено.")
+
+    def library_dialog(self):
+        from .material_library import load_index,signature,norm
+        lesson=self.selected()
+        if not lesson:return
+        sig=signature(lesson,self.cfg)
+        matching=[item for item in load_index()['items']
+                  if item['signature']==sig and item['topic_norm']==norm(lesson.topic)
+                  and Path(item['path']).is_file()]
+        if not matching:
+            messagebox.showinfo("Бібліотека","Відповідної лекції немає. Натисніть «Вибрати готовий Word», щоб додати її.");return
+        win=tk.Toplevel(self);win.title("Бібліотека перевірених лекцій");win.geometry("800x360")
+        ttk.Label(win,text="Показано лише лекції з тим самим предметом, програмою, годинами і темою.").pack(anchor="w",padx=12,pady=8)
+        box=tk.Listbox(win,height=9)
+        box.pack(fill="both",expand=True,padx=12,pady=10)
+        for item in matching:box.insert("end",f"{item['topic'][:82]} · {item['added']} · {item['origin']}")
+        box.selection_set(0)
+        def apply():
+            ids=box.curselection()
+            if not ids:return
+            item=matching[ids[0]]
+            if not self._parallel_prompt(lesson,"Використати цей раніше перевірений Word без додаткової оплати?"):
+                return
+            attached=attach_document(item,self._parallel(lesson),self.state)
+            save_state(self.state);self.update_day();win.destroy()
+            messagebox.showinfo("Бібліотека",f"Прив'язано уроків: {len(attached)}.")
+        ttk.Button(win,text="Використати для паралелі",command=apply).pack(pady=6)
 
     def validate_docx(self):
         lesson=self.selected()
@@ -225,6 +348,50 @@ class MainApp(tk.Tk):
             self.clipboard_append(content)
             self.update()
             messagebox.showinfo("Classroom", "Повідомлення скопійоване.")
+
+    def save_classroom_description(self):
+        lesson=self.selected()
+        if lesson is None:return
+        description=self.desc.get("1.0","end").strip()
+        if not description:
+            messagebox.showwarning("Classroom","Опис уроку не може бути порожнім.")
+            return
+        self.state.setdefault("description_overrides",{})[lesson.unique_key]=description
+        save_state(self.state)
+        messagebox.showinfo("Опис збережено","Текст опису збережено для цього уроку на цьому комп'ютері. У Classroom його ще НЕ надіслано.")
+
+    def save_parallel_description(self):
+        lesson=self.selected()
+        if not lesson:return
+        text=self.desc.get("1.0","end").strip()
+        if not text:
+            messagebox.showerror("Опис","Текст не може бути порожнім.");return
+        template=topic_template(text,lesson)
+        if "{topic}" not in template or "{date}" not in template or "{homework}" not in template:
+            if not messagebox.askyesno("Динамічні поля",
+                "Не всі змінні {topic}, {date}, {homework} є в тексті. "
+                "Це може перенести стару дату або Д/з в інші класи. Зберегти?"):
+                return
+        if not messagebox.askyesno("Шаблон паралелі",
+             "Застосувати відредагований шаблон до тієї ж паралелі з однаковою "
+             "програмою та кількістю годин? Змінні тема/дата/Д/з будуть підставлятися окремо."):
+            return
+        self.state.setdefault("parallel_templates",{})[signature_key(lesson,self.cfg)]=template
+        # User asked to save parallel format; drop this lesson's local override so it also uses template.
+        self.state.setdefault("description_overrides",{}).pop(lesson.unique_key,None)
+        save_state(self.state)
+        messagebox.showinfo("Шаблон збережено",
+                            "Збережено для сумісної паралелі. Під час вибору іншого "
+                            "класу буде підставлено його дату, тему та Д/з.")
+        self.select()
+
+    def show_help(self):
+        from .help_ui import show_help
+        show_help(self)
+
+    def edit_academic_year(self):
+        from .editor_ui import SchoolEditor
+        SchoolEditor(self,self.update_day)
 
     def setup_dialog(self):
         """Настроювання без ручного копіювання JSON або змінних середовища."""
@@ -277,17 +444,8 @@ class MainApp(tk.Tk):
                 messagebox.showerror("Google OAuth",str(ex),parent=dlg)
 
         def save_key():
-            key=simpledialog.askstring("AI-ключ OpenAI", "Вставте ваш OpenAI API key.\\nВін зберігатиметься ЛИШЕ на цьому Windows-комп’ютері.", show="*",parent=dlg)
-            if key is None: return
-            key=key.strip()
-            if not key:
-                messagebox.showwarning("AI", "Порожній ключ не збережено.",parent=dlg);return
-            try:
-                import keyring
-                keyring.set_password("Помічник учителя Classroom","OPENAI_API_KEY",key)
-                messagebox.showinfo("AI", "Ключ збережено у сховищі Windows. Можна натискати «Word: повна AI-лекція».",parent=dlg)
-            except Exception as ex:
-                messagebox.showerror("Сховище ключа",str(ex),parent=dlg)
+            from .editor_ui import api_key_dialog
+            api_key_dialog(dlg)
 
         ttk.Button(buttons,text="Імпортувати Google OAuth JSON",command=import_credentials).pack(side="left",padx=5)
         ttk.Button(buttons,text="Зберегти AI-ключ",command=save_key).pack(side="left",padx=5)
@@ -345,6 +503,9 @@ class MainApp(tk.Tk):
     def draft(self):
         lesson=self.selected()
         if not lesson:return
+        if lesson.status!="готово":
+            messagebox.showerror("КТП","Цей урок не готовий: спочатку імпортуйте та перевірте календарний план поточного року.")
+            return
         key=lesson.unique_key
         if key in self.state.get("drafts",{}):
             messagebox.showerror("Дублікат","Для цього уроку вже створено чернетку Classroom. Повторне створення заблоковано.");return
@@ -363,7 +524,9 @@ class MainApp(tk.Tk):
         if not messagebox.askyesno("Підтвердження",confirm):return
         def task():
             from .google_client import create_draft
-            return create_draft(course_id,f"Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}",
+            return create_draft(course_id,
+                f"Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}. "
+                "(Асинхронно — без виходу у Zoom у зв’язку з довготривалою повітряною тривогою і загрозою для життя і здоров’я)",
                  text,f["path"],assignment)
         def done(result):
             self.state.setdefault("drafts",{})[key]=result
