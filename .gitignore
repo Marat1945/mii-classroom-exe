@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+build/
+dist/
+*.spec
+*.zip
+data/Стан.json
+data/google_credentials.json
+data/google_token.json
+Готові Word/
+.env
