@@ -49,13 +49,15 @@ def weekday_ua(value):
 class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.1")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.2")
         self.geometry("1250x770")
         self.minsize(1060,630)
         self.cfg=read_json("Налаштування.json")
         self.state=read_state()
         self.rows=[]
         self.google_courses=[]
+        # Дані лише для перегляду, не змінюють локальні КТП і Google-чернетки.
+        self.remote_classroom_entries={}
         self._build()
         self.update_day()
 
@@ -77,10 +79,12 @@ class MainApp(WindowBase):
         self.phase=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"))
         self.phase.pack(side="left",padx=15)
 
-        cols=("№","Час","Потік","Курс Classroom","КТП","Тема","Стан")
+        cols=("№","Час","Потік","Курс Classroom","Тема","КТП","Стан")
+        self.grid_columns=cols
         table_frame=ttk.Frame(outer);table_frame.pack(fill="both",expand=True)
-        self.grid=ttk.Treeview(table_frame,columns=cols,show="headings",height=11)
-        widths=(43,100,140,160,60,510,150)
+        self.grid=ttk.Treeview(table_frame,columns=cols,show="headings",
+                                selectmode="extended",height=11)
+        widths=(43,100,140,160,510,60,150)
         for col,width in zip(cols,widths):
             self.grid.heading(col,text=col)
             self.grid.column(col,width=width,minwidth=42,anchor="w")
@@ -92,6 +96,17 @@ class MainApp(WindowBase):
         table_frame.rowconfigure(0,weight=1);table_frame.columnconfigure(0,weight=1)
         self.grid.bind("<<TreeviewSelect>>",lambda _:self.select())
         self.grid.bind("<Button-3>",self._open_lesson_menu)
+        self.grid.bind("<ButtonPress-1>",self._column_drag_start,add="+")
+        self.grid.bind("<ButtonRelease-1>",self._column_drag_end,add="+")
+        preferred=self.state.get("column_order")
+        if (isinstance(preferred,list) and len(preferred)==len(cols)
+                and set(preferred)==set(cols)):
+            self.grid.configure(displaycolumns=preferred)
+        else:self.grid.configure(displaycolumns=cols)
+        self._column_start=None
+        if DND_FILES:
+            self.grid.drop_target_register(DND_FILES)
+            self.grid.dnd_bind("<<Drop>>",self._drop_on_lesson)
 
         actions=ttk.Frame(outer);actions.pack(fill="x",pady=9)
         for title,callback in [
@@ -114,12 +129,20 @@ class MainApp(WindowBase):
         ttk.Checkbutton(actions2,text="Це завдання для здавання (не матеріал)",variable=self.assignment).pack(side="left",padx=8)
         ttk.Button(actions2,text="Створити ЧЕРНЕТКУ в Classroom",command=self.draft).pack(side="right",padx=3)
         actions3=ttk.Frame(outer);actions3.pack(fill="x",pady=3)
+        self.batch_drafts_button=ttk.Button(
+            actions3,text="СТВОРИТИ ЧЕРНЕТКИ ДЛЯ ВСІХ УРОКІВ ЦЬОГО ДНЯ",
+            command=self.batch_drafts)
+        self.batch_drafts_button.pack(side="right",padx=6)
+        self._batch_drafts_running=False
         ttk.Button(actions3,text="РЕДАКТОР КТП, РОЗКЛАДУ І НАВЧАЛЬНОГО РОКУ",command=self.edit_academic_year).pack(side="left",padx=3)
         ttk.Button(actions3,text="❓ ДОВІДКА",command=self.show_help).pack(side="right",padx=4)
+        ttk.Button(actions3,text="МІЙ CLASSROOM — ПЕРЕГЛЯД",
+                   command=self.view_classroom).pack(side="right",padx=4)
         ttk.Label(actions3,text="Плани • розклад • бібліотека • дзвоники • допомога").pack(side="left",padx=10)
         ttk.Label(outer,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
         self.desc=tk.Text(outer,height=13,wrap="word",font=("Segoe UI",10))
         self.desc.pack(fill="both",expand=True)
+        self.desc.bind("<Button-3>",self._description_context_menu)
         self.attachment_toolbar=ttk.Frame(outer)
         self.attachment_toolbar.pack(fill="x",pady=(5,2))
         ttk.Button(self.attachment_toolbar,text="📎 Додати файли до Classroom",
@@ -181,8 +204,11 @@ class MainApp(WindowBase):
             adjusted=self.effective_lesson(row)
             if row.unique_key in self.state.get("lesson_models",{}):
                 status="Зразок із паралелі · "+status
+            remote=self._remote_classroom_status(adjusted)
+            if remote:
+                status=f"{remote} · {status}"
             self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",
-                     row.stream,row.course_title,row.lesson_number,adjusted.topic,status))
+                     row.stream,row.course_title,adjusted.topic,row.lesson_number,status))
         self.desc.delete("1.0","end")
         if self.rows:
             chosen=next((str(i) for i,x in enumerate(self.rows) if x.unique_key==prior),"0")
@@ -190,6 +216,22 @@ class MainApp(WindowBase):
             self.grid.focus(chosen)
             self.select()
         else:self.foot.config(text="На обрану дату уроків немає (вихідний або канікули).")
+
+    def _remote_classroom_status(self,lesson):
+        """Ознака тільки після синхронізації та точного збігу теми + дати."""
+        cid=str(self.state.get("course_ids",{}).get(lesson.course_title,""))
+        if not cid or cid not in self.remote_classroom_entries:return ""
+        from .classroom_archive import compatible_classroom_title
+        matched=[row for row in self.remote_classroom_entries[cid]
+                 if compatible_classroom_title(lesson,row)]
+        if not matched:return ""
+        return ("Опубліковано в Classroom" if
+                any(x["state"]=="PUBLISHED" for x in matched)
+                else "Є чернетка в Classroom")
+
+    def view_classroom(self):
+        from .classroom_browser import show_classroom_viewer
+        show_classroom_viewer(self)
 
     def selected(self):
         selection=self.grid.selection()
@@ -357,11 +399,183 @@ class MainApp(WindowBase):
             "Повторно натискати «Підтвердити Word» НЕ потрібно. "
             "Classroom не змінено.")
 
+    def _column_drag_start(self,event):
+        self._column_start=None
+        if self.grid.identify_region(event.x,event.y)=="heading":
+            self._column_start=(self.grid.identify_column(event.x),event.x)
+
+    def _column_drag_end(self,event):
+        start=self._column_start
+        self._column_start=None
+        if not start or self.grid.identify_region(event.x,event.y)!="heading":return
+        source,index_x=start
+        destination=self.grid.identify_column(event.x)
+        if destination==source or abs(event.x-index_x)<14:return
+        try:
+            order=list(self.grid["displaycolumns"])
+            a,b=int(source[1:])-1,int(destination[1:])-1
+            if not (0<=a<len(order) and 0<=b<len(order)):return
+            col=order.pop(a)
+            order.insert(b,col)
+            self.grid.configure(displaycolumns=order)
+            self.state["column_order"]=list(order)
+            save_state(self.state)
+        except (ValueError,tk.TclError):return
+
+    def _description_context_menu(self,event):
+        menu=tk.Menu(self.desc,tearoff=False)
+        menu.add_command(label="Вирізати",command=lambda:self.desc.event_generate("<<Cut>>"))
+        menu.add_command(label="Копіювати",command=lambda:self.desc.event_generate("<<Copy>>"))
+        menu.add_command(label="Вставити",command=lambda:self.desc.event_generate("<<Paste>>"))
+        menu.add_command(label="Виділити весь текст",
+                         command=lambda:self.desc.tag_add("sel","1.0","end-1c"))
+        menu.add_separator()
+        menu.add_command(label="Взяти текст і Word з попереднього уроку паралелі…",
+                         command=lambda:self.borrow_lesson("past"))
+        menu.add_command(label="Взяти текст і Word з наступного уроку паралелі…",
+                         command=lambda:self.borrow_lesson("future"))
+        menu.add_command(label="Зберегти текст цього уроку",
+                         command=self.save_classroom_description)
+        menu.add_command(label="Прикріпити файл…",command=self.choose_attachments)
+        try:menu.tk_popup(event.x_root,event.y_root)
+        finally:menu.grab_release()
+        return "break"
+
+    def _selected_rows(self):
+        """Тільки реально виділені рядки. Ctrl / Shift доступні в Treeview."""
+        return [self.rows[int(i)] for i in self.grid.selection()
+                if i.isdecimal() and int(i)<len(self.rows)]
+
+    def copy_row_materials(self):
+        row=self.selected()
+        if not row:return
+        material=self.state.get("files",{}).get(row.unique_key,{})
+        if not (material.get("validated") and Path(material.get("path","")).is_file()):
+            messagebox.showwarning("Копіювання","Спочатку виберіть урок із готовим перевіреним Word.")
+            return
+        self._copied_lesson_key=row.unique_key
+        self._copied_row_details=self.effective_lesson(row)
+        override=self.state.get("description_overrides",{}).get(row.unique_key)
+        self._copied_row_text=(self.desc.get("1.0","end-1c") if
+              len(self.grid.selection())==1 else override)
+        messagebox.showinfo("Урок скопійовано",
+              "Тепер затисніть Ctrl або Shift, виділіть один чи кілька рядків "
+              "і клацніть правою кнопкою → «Вставити копію». "
+              "У Google нічого не надсилається.")
+
+    def paste_row_materials(self):
+        source=getattr(self,"_copied_row_details",None)
+        key=getattr(self,"_copied_lesson_key",None)
+        if not source or not key:return
+        targets=[lesson for lesson in self._selected_rows() if lesson.unique_key!=key]
+        if not targets:
+            messagebox.showinfo("Вставити урок","Виділіть один або кілька ІНШИХ уроків.")
+            return
+        src_meta=self.state.get("files",{}).get(key,{})
+        if not (src_meta.get("validated") and Path(src_meta.get("path","")).is_file()):
+            messagebox.showerror("Word","Вихідний файл Word відсутній або не перевірений.")
+            return
+        source_grade,source_subject=stream_subject(source.stream)
+        mismatched=[x for x in targets if stream_subject(x.stream)!=(source_grade,source_subject)]
+        if mismatched:
+            messagebox.showerror("Не той предмет",
+                "Копіювати можна лише в межах одного класу навчання та предмета. "
+                "Для інших предметів виберіть відповідний матеріал вручну.")
+            return
+        drafts=[x for x in targets if x.unique_key in self.state.get("drafts",{})]
+        if drafts:
+            messagebox.showerror("Уроки з чернетками",
+                   "Є уроки, для яких уже створено чернетку Google. "
+                   "Зніміть з них виділення, щоб не створити невідповідність.")
+            return
+        different=any(signature(x,self.cfg)!=signature(source,self.cfg) for x in targets)
+        detail=("\n\nУвага: окремі класи мають інші КТП або кількість годин. "
+                "Це ЛИШЕ ваш ручний вибір, а не автоматичне поширення."
+                if different else "")
+        if not messagebox.askyesno("Підтвердження копіювання",
+            f"Вставити «{source.topic}» у {len(targets)} вибраних уроків?\n"
+            "Копіюються Word, тема, текст і вкладення; дата стає датою цільового "
+            "уроку. КТП і курс Google НЕ змінюються."
+            +detail+"\n\nОпублікування не виконується."):return
+        text=self._copied_row_text
+        if text is None:
+            text=self.state.get("description_overrides",{}).get(key)
+        if text is None:
+            templ=self.state.get("parallel_templates",{}).get(signature_key(source,self.cfg))
+            text=render_template(templ,source) if templ is not None else html_classroom_text(source,asynchronous=True,video=True)
+        source_date=source.day[8:10]+"."+source.day[5:7]
+        for target in targets:
+            local=dataclass_replace(target,topic=source.topic,homework=source.homework)
+            try:
+                doc=copy_for_lesson(src_meta["path"],local)
+                copy_attachments(self.state,key,target.unique_key)
+            except Exception as ex:
+                messagebox.showerror("Копіювання перервано",str(ex))
+                save_state(self.state);self.update_day()
+                return
+            self.state.setdefault("lesson_models",{})[target.unique_key]={
+                  "topic":source.topic,"homework":source.homework,"from":key}
+            new_date=target.day[8:10]+"."+target.day[5:7]
+            self.state.setdefault("description_overrides",{})[target.unique_key]=text.replace(source_date,new_date)
+            self.state.setdefault("files",{})[target.unique_key]={
+                  "path":str(doc),"validated":True,"complete":True,"borrowed_from":key}
+        save_state(self.state);self.update_day()
+        messagebox.showinfo("Готово",f"Перенесено у {len(targets)} уроків. "
+            "Перевірте теми й домашні завдання перед чернетками.")
+
+    def _drop_on_lesson(self,event):
+        """Перетягнутий Word — готовий урок; інші файли — вкладення саме цього рядка."""
+        item=self.grid.identify_row(self.grid.winfo_pointery()-self.grid.winfo_rooty())
+        if not item:return "break"
+        self.grid.selection_set(item);self.grid.focus(item)
+        lesson=self.rows[int(item)]
+        try:paths=[Path(path) for path in self.tk.splitlist(event.data)]
+        except (tk.TclError,ValueError):return "break"
+        if lesson.unique_key in self.state.get("drafts",{}):
+            messagebox.showwarning("Чернетка вже існує",
+                  "Цей урок уже має чернетку. Додайте файли у Google Classroom.")
+            return "break"
+        docs=[path for path in paths if path.suffix.casefold()==".docx"]
+        others=[path for path in paths if path.suffix.casefold()!=".docx"]
+        if docs:
+            # Для двох Word немає однозначного головного документа — питаємо.
+            if len(docs)>1:
+                others+=docs[1:]
+            self._accept_dropped_word(lesson,docs[0])
+        if others:self._attach_paths(others,lesson=lesson)
+        return "break"
+
+    def _accept_dropped_word(self,lesson,path):
+        try:check_real_docx(path)
+        except Exception as ex:
+            messagebox.showerror("Word",str(ex));return
+        if not self._parallel_prompt(lesson,
+              "Перетягнутий Word прийняти як ПОВНУ перевірену лекцію для цієї теми "
+              "й автоматично поширити на сумісну паралель?"):return
+        try:
+            attached=self._attach_from_master(path,lesson,"Перетягнутий Word",
+                                                replace_existing=True)
+        except Exception as ex:
+            messagebox.showerror("Не вдалося прикріпити Word",str(ex));return
+        messagebox.showinfo("Word додано",
+             f"Word прив’язано до {len(attached)} уроків. "
+             "Кнопку «Підтвердити Word» натискати не треба. "
+             "До Google файли ще не надіслано.")
+
     def _open_lesson_menu(self,event):
         item=self.grid.identify_row(event.y)
         if not item:return
-        self.grid.selection_set(item);self.grid.focus(item)
+        if item not in self.grid.selection():
+            self.grid.selection_set(item)
+        self.grid.focus(item)
         menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label="Копіювати урок (Word + текст + вкладення)",
+                         command=self.copy_row_materials)
+        selected_count=len(self.grid.selection())
+        menu.add_command(label=f"Вставити копію у виділені уроки ({selected_count})",
+                         command=self.paste_row_materials,
+                         state="normal" if getattr(self,"_copied_lesson_key",None) else "disabled")
+        menu.add_separator()
         menu.add_command(label="Взяти попередній урок із паралелі…",
                          command=lambda:self.borrow_lesson("past"))
         menu.add_command(label="Взяти майбутній урок із паралелі…",
@@ -482,8 +696,8 @@ class MainApp(WindowBase):
             filetypes=[("Усі файли","*.*")])
         self._attach_paths(paths)
 
-    def _attach_paths(self,paths):
-        lesson=self.selected()
+    def _attach_paths(self,paths,lesson=None):
+        lesson=lesson or self.selected()
         if not lesson or not paths:return
         if lesson.unique_key in self.state.get("drafts",{}):
             messagebox.showwarning("Уже створено чернетку",
@@ -754,6 +968,122 @@ class MainApp(WindowBase):
             messagebox.showinfo("Збережено",f"Зіставлено курсів: {len(mapped)}/{len(vars)}")
         ttk.Button(dialog,text="Зберегти зіставлення",command=save).pack(pady=9)
 
+    def _description_for_batch(self,lesson):
+        """Враховує змінену вручну тему й актуальний текст вибраного уроку."""
+        adjusted=self.effective_lesson(lesson)
+        current=self.selected()
+        if current and current.unique_key==lesson.unique_key:
+            return self.desc.get("1.0","end-1c").strip()
+        saved=self.state.get("description_overrides",{}).get(lesson.unique_key)
+        if saved is not None:return saved
+        template=self.state.get("parallel_templates",{}).get(
+            signature_key(lesson,self.cfg))
+        if template is not None:return render_template(template,adjusted)
+        return html_classroom_text(adjusted,asynchronous=True,video=True)
+
+    def batch_drafts(self):
+        """Створення лише ПЕРЕВІРЕНИХ чернеток за обрану дату, по одній."""
+        if self._batch_drafts_running:return
+        if not self.rows:
+            messagebox.showinfo("Чернетки за день",
+                  "Цього дня немає уроків (можливо, вихідний або канікули).")
+            return
+        from .draft_batch import plan_day_drafts
+        effective_rows=[self.effective_lesson(row) for row in self.rows]
+        ready,skipped=plan_day_drafts(
+            effective_rows,self.state,self._description_for_batch)
+        # Захист від повторів серед вже видимих записів після синхронізації.
+        # Без синхронізації це не є перевіркою всього сервера.
+        not_repeated=[]
+        for candidate in ready:
+            if self._remote_classroom_status(candidate["lesson"]):
+                skipped.append((candidate["lesson"],
+                   "такий урок уже видно у Classroom після синхронізації"))
+            else:not_repeated.append(candidate)
+        ready=not_repeated
+        summary=[f"Дата: {self.datevar.get()}",
+                 f"Готові для чернеток: {len(ready)}",
+                 f"Пропущено: {len(skipped)}"]
+        summary.extend(f"✓ {x['lesson'].period}. {x['lesson'].stream}: "
+                       f"{x['lesson'].topic[:70]}" for x in ready)
+        summary.extend(f"— {x.period}. {x.stream}: {reason}"
+                       for x,reason in skipped)
+        if not ready:
+            messagebox.showinfo("Чернетки за день","\n".join(summary))
+            return
+        confirmation=(
+            "\n".join(summary)+
+            "\n\nСтворити тільки ЧЕРНЕТКИ-матеріали в указаних Google-курсах? "
+            "У кожному будуть лише наявні матеріали: текст, перевірений Word "
+            "(за наявності) та додаткові вкладення. "
+            "Учні НЕ отримають публікацій. Відео додаються вручну.\n\n"
+            "Перевірте теми, дати й домашні завдання до підтвердження."
+        )
+        if not messagebox.askyesno("Пакетна підготовка чернеток",confirmation):
+            return
+        self._batch_drafts_running=True
+        self.batch_drafts_button.config(state="disabled")
+        self.foot.config(text=f"Створюю {len(ready)} чернеток послідовно…")
+        # Зафіксувати план до початку відправлень: зміни вибраного рядка
+        # або дати після старту не вплинуть на вже підтверджений перелік.
+        def task():
+            from .google_client import create_draft
+            done=[]
+            errors=[]
+            for item in ready:
+                # Повторно перевірити дублікат безпосередньо перед API-запитом.
+                if item["key"] in self.state.get("drafts",{}):
+                    continue
+                try:
+                    record=create_draft(
+                        item["course_id"],item["title"],item["description"],
+                        item["docx_path"],False,item["attachments"])
+                except Exception as ex:
+                    errors.append(f"{item['lesson'].stream}: {ex}")
+                    # Stop: the reason might be a network or authorization error.
+                    break
+                self.state.setdefault("drafts",{})[item["key"]]=record
+                try:
+                    # IMPORTANT: Записати кожний результат ОДРАЗУ, щоб
+                    # наступна помилка не спричинила повторних публікацій.
+                    save_state(self.state)
+                except Exception as ex:
+                    errors.append("Чернетка створена, але не вдалося зберегти "
+                       "локальну позначку! Перевірте Classroom перед повтором. "
+                       f"{item['lesson'].stream}: {ex}")
+                    break
+                done.append(item)
+            return done,errors
+
+        def finished(result):
+            successful,errors=result
+            self._batch_drafts_running=False
+            self.batch_drafts_button.config(state="normal")
+            self.update_day()
+            msg=(f"Створено чернеток: {len(successful)} з {len(ready)} готових.\n"
+                 f"Пропущено до початку: {len(skipped)}.\n"
+                 "Жоден матеріал не опубліковано.")
+            if errors:
+                msg+="\n\nПісля помилки зупинено відправлення:\n"+"\n".join(errors)
+                msg+="\nПеревірте вже створені чернетки в Classroom, перш ніж повторювати."
+                messagebox.showwarning("Пакетна підготовка",msg)
+            else:messagebox.showinfo("Пакетна підготовка",msg)
+        def safe_worker():
+            try:
+                result=task()
+                self.after(0,lambda:finished(result))
+            except Exception as ex:
+                msg=str(ex)
+                def failed():
+                    self._batch_drafts_running=False
+                    self.batch_drafts_button.config(state="normal")
+                    self.update_day()
+                    messagebox.showerror("Пакетні чернетки",
+                        "Сталася непередбачена помилка. Перевірте Classroom "
+                        "перед повторним запуском:\n"+msg)
+                self.after(0,failed)
+        threading.Thread(target=safe_worker,daemon=True).start()
+
     def draft(self):
         original=self.selected()
         if not original:return
@@ -764,18 +1094,36 @@ class MainApp(WindowBase):
         key=lesson.unique_key
         if key in self.state.get("drafts",{}):
             messagebox.showerror("Дублікат","Для цього уроку вже створено чернетку Classroom. Повторне створення заблоковано.");return
-        f=self.state.get("files",{}).get(key)
-        if not f or not f.get("validated"):
-            messagebox.showerror("Перевірка","Потрібен ГОТОВИЙ і перевірений Word. Заготовка не підходить.");return
+        f=self.state.get("files",{}).get(key,{})
+        word_path=(str(f["path"]) if
+                   f.get("validated") and f.get("complete")
+                   and Path(f.get("path","")).is_file() else None)
         course_id=self.state.get("course_ids",{}).get(lesson.course_title)
         if not course_id:
             messagebox.showerror("Classroom","Цей курс ще не зіставлено з Google Classroom.");return
+        duplicate=self._remote_classroom_status(lesson)
+        if duplicate and not messagebox.askyesno(
+                "Перевірте можливий повтор",
+                f"Після синхронізації в Classroom уже знайдено: «{duplicate}».\n"
+                "Ви дійсно хочете створити ще одну окрему чернетку?",
+                parent=self):
+            return
         text=self.desc.get("1.0","end").strip()
         assignment=self.assignment.get()
         attachment_paths=files_for_lesson(self.state,key)
+        if len(attachment_paths)!=len(self.state.get("attachments",{}).get(key,[])):
+            messagebox.showerror("Вкладення",
+              "Деякі прикріплені файли відсутні. Приберіть їх зі списку або додайте знову.")
+            return
+        if not text and not word_path and not attachment_paths:
+            messagebox.showwarning("Порожній матеріал",
+                "Напишіть повідомлення або додайте зображення, інший файл чи Word.")
+            return
         confirm=("Створити ТІЛЬКИ ЧЕРНЕТКУ?\n\n"
                  f"Курс: {lesson.course_title}\nДата уроку: {lesson.day}\n"
                  f"Тема: {lesson.topic[:110]}\n"
+                 f"Word: {'додається' if word_path else 'не потрібний / не додається'}\n"
+                 f"Текст: {'є' if text else 'без опису'}\n"
                  f"Додаткові вкладення: {len(attachment_paths)}\n\n"
                  "Відео потрібно додати вручну перед публікацією.")
         if not messagebox.askyesno("Підтвердження",confirm):return
@@ -784,7 +1132,7 @@ class MainApp(WindowBase):
             return create_draft(course_id,
                 f"Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}. "
                 "(Асинхронно — без виходу у Zoom у зв’язку з довготривалою повітряною тривогою і загрозою для життя і здоров’я)",
-                 text,f["path"],assignment,attachment_paths)
+                 text,word_path,assignment,attachment_paths)
         def done(result):
             self.state.setdefault("drafts",{})[key]=result
             save_state(self.state);self.update_day()

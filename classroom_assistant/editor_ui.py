@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from pathlib import Path
 from .editor_core import deep_copy_data, guess_columns, extract_lessons, docx_table_rows, csv_rows, persist, validate_working, tidy
-from .engine import ROOT, save_state
+from .engine import ROOT, save_state, build_calendar
 
 
 def friendly_plan_id(code):
@@ -227,9 +227,21 @@ class SchoolEditor(tk.Toplevel):
         self.plan_name.pack(anchor="w")
         self.plan_count=ttk.Label(right,text="")
         self.plan_count.pack(anchor="w")
+        datebar=ttk.Frame(right);datebar.pack(fill="x",pady=(2,3))
+        ttk.Label(datebar,text="Дати уроків для класу:").pack(side="left",padx=(0,6))
+        self.ktp_dates_stream=tk.StringVar()
+        self.ktp_dates_combo=ttk.Combobox(datebar,textvariable=self.ktp_dates_stream,
+                                              state="readonly",width=25)
+        self.ktp_dates_combo.pack(side="left")
+        self.ktp_dates_combo.bind("<<ComboboxSelected>>",
+                                  lambda _:self.refresh_lessons(self.lesson_row))
+        ttk.Label(datebar,text="Дати розраховано за розкладом і канікулами; "
+                       "для іншого класу виберіть його вище.",
+                  foreground="#365777").pack(side="left",padx=9)
         frame=ttk.Frame(right);frame.pack(fill="both",expand=True,pady=6)
-        self.lessons=ttk.Treeview(frame,columns=("num","topic","hw"),show="headings",height=14)
-        for col,title,width in (("num","№",40),("topic","Тема",490),("hw","Домашнє завдання",310)):
+        self.lessons=ttk.Treeview(frame,columns=("num","date","topic","hw"),show="headings",height=14)
+        for col,title,width in (("num","№",40),("date","Дата",96),
+                                 ("topic","Тема",455),("hw","Домашнє завдання",285)):
             self.lessons.heading(col,text=title);self.lessons.column(col,width=width)
         vert=ttk.Scrollbar(frame,command=self.lessons.yview)
         self.lessons.configure(yscrollcommand=vert.set)
@@ -299,9 +311,21 @@ class SchoolEditor(tk.Toplevel):
         if not self.current_plan:return
         doc=self.plans[self.current_plan]
         entries=doc["lessons"]
+        streams=[name for name,info in self.cfg["course_map"].items()
+                 if info.get("plan")==self.current_plan]
+        streams.sort()
+        current=self.ktp_dates_stream.get()
+        self.ktp_dates_combo.configure(values=streams)
+        if current not in streams:
+            self.ktp_dates_stream.set(streams[0] if streams else "")
+        active=self.ktp_dates_stream.get()
+        dates={x.lesson_number:display_ui_date(x.day)
+               for x in build_calendar(self.cfg,self.plans)
+               if x.stream==active and x.plan_id==self.current_plan}
         for item in self.lessons.get_children():self.lessons.delete(item)
         for i,row in enumerate(entries):
-            self.lessons.insert("","end",iid=str(i),values=(i+1,row["topic"],row.get("homework","")))
+            self.lessons.insert("","end",iid=str(i),
+                     values=(i+1,dates.get(i+1,""),row["topic"],row.get("homework","")))
         extra=" ⚠ ПЕРЕВІРТЕ КТП НОВОГО РОКУ" if doc.get("needs_review") else ""
         self.plan_name.config(text=f"{friendly_plan_id(self.current_plan)} • {doc.get('filename','План без джерела')[:90]}{extra}")
         self.plan_count.config(text=f"{len(entries)} уроків. Зміни будуть збережені лише після загальної кнопки «ЗБЕРЕГТИ»")
@@ -491,8 +515,9 @@ class SchoolEditor(tk.Toplevel):
         for col,title,w in (("name","Клас + предмет / потік",230),("plan","Ідентифікатор КТП",160),("course","Назва у Google Classroom",310)):
             self.streamtree.heading(col,text=title);self.streamtree.column(col,width=w)
         self.streamtree.pack(fill="both",expand=True,pady=4)
+        self.streamtree.bind("<ButtonRelease-1>",self._open_inline_on_click)
         self.streamtree.bind("<Double-1>",self._inline_stream_edit)
-        ttk.Label(tab,text="Двічі клацніть по КТП або назві Classroom для зміни прямо у таблиці.",
+        ttk.Label(tab,text="Натисніть один раз на КТП або назву Classroom — з’явиться випадаючий список.",
                   foreground="#245471").pack(anchor="w")
         bar=ttk.Frame(tab);bar.pack(fill="x",pady=8)
         for title,fn in [("Додати потік",lambda:self.edit_stream(True)),
@@ -508,7 +533,17 @@ class SchoolEditor(tk.Toplevel):
         self.cfg["classroom_course_titles"]=list(dict.fromkeys(
             info["course_title"] for info in self.cfg["course_map"].values()))
 
-    def _inline_stream_edit(self,event):
+    def _open_inline_on_click(self,event):
+        if self.streamtree.identify_region(event.x,event.y)!="cell":return
+        if self.streamtree.identify_column(event.x) not in ("#2","#3"):return
+        x,y=event.x,event.y
+        self.after(10,lambda:self._inline_stream_edit_xy(x,y,open_list=True))
+
+    def _inline_stream_edit_xy(self,x,y,open_list=False):
+        from types import SimpleNamespace
+        self._inline_stream_edit(SimpleNamespace(x=x,y=y),open_list=open_list)
+
+    def _inline_stream_edit(self,event,open_list=False):
         item=self.streamtree.identify_row(event.y)
         column=self.streamtree.identify_column(event.x)
         if not item or column not in ("#2","#3"):return
@@ -532,6 +567,12 @@ class SchoolEditor(tk.Toplevel):
         editor.set(current_value)
         editor.place(x=x,y=y,width=width,height=height)
         editor.focus_set()
+        if open_list:
+            def post_dropdown():
+                if editor.winfo_exists():
+                    try:editor.tk.call("ttk::combobox::Post",editor)
+                    except tk.TclError:pass
+            self.after(40,post_dropdown)
         closed=[False]
         def finish(save=True):
             if closed[0]:return
@@ -614,12 +655,34 @@ class SchoolEditor(tk.Toplevel):
             ttk.Label(fields,text=label,width=37).grid(row=len(self.dates),column=0,sticky="w",pady=5)
             var=tk.StringVar(value=display_ui_date(self.cfg[key]));self.dates[key]=var
             ttk.Entry(fields,textvariable=var,width=21).grid(row=len(self.dates)-1,column=1,sticky="w")
-        ttk.Label(fields,text="Тип опорного тижня").grid(row=3,column=0,sticky="w")
+        ttk.Label(fields,text="Опорний тиждень ПЕРШОГО семестру").grid(row=3,column=0,sticky="w")
         self.anchorphase=tk.StringVar(value=self.cfg.get("anchor_phase","чисельник"))
         ttk.Combobox(fields,values=("чисельник","знаменник"),textvariable=self.anchorphase,state="readonly",width=18).grid(row=3,column=1,sticky="w")
         ttk.Button(fields,text="Застосувати ці дати",command=self.apply_dates).grid(row=4,column=0,pady=10,sticky="w")
         ttk.Button(fields,text="РОЗПОЧАТИ НОВИЙ НАВЧАЛЬНИЙ РІК",command=self.new_year).grid(row=4,column=1,padx=8,pady=10,sticky="w")
-        ttk.Label(tab,text="Канікули: додайте/видаліть будь-який період, без автоматичного планування на ці дні.").pack(anchor="w",pady=(15,3))
+        semesterbox=ttk.LabelFrame(tab,text="ДРУГИЙ СЕМЕСТР — окреме коригування (тільки за потреби)",padding=6)
+        semesterbox.pack(fill="x",pady=(6,3),anchor="w")
+        self.semester2_enabled=tk.BooleanVar(value=self.cfg.get("semester2_override",False))
+        ttk.Checkbutton(semesterbox,text="Використовувати окрему парність із початку другого семестру",
+                        variable=self.semester2_enabled).grid(row=0,column=0,columnspan=3,sticky="w")
+        proposed=self.cfg.get("semester2_start")
+        if not proposed:
+            # Після зимових канікул — лише ПРИКЛАД дати, прапорець вимкнений.
+            holidays=self.cfg.get("holidays",[])
+            winter=[x for x in holidays if x["start"]>self.cfg["year_start"][:4]+"-11-01"
+                    and x["end"]<self.cfg["year_end"][:4]+"-03-01"]
+            suggested=date.fromisoformat(winter[0]["end"])+timedelta(days=1) if winter else date.fromisoformat(self.cfg["year_start"]).replace(month=1,year=date.fromisoformat(self.cfg["year_start"]).year+1)
+            proposed=(suggested+timedelta(days=(7-suggested.weekday())%7)).isoformat()
+        self.semester2_start=tk.StringVar(value=display_ui_date(proposed))
+        ttk.Label(semesterbox,text="Перший понеділок другого семестру (ДД.ММ.РРРР):").grid(row=1,column=0,sticky="w",pady=5)
+        ttk.Entry(semesterbox,textvariable=self.semester2_start,width=17).grid(row=1,column=1,sticky="w",padx=8)
+        self.semester2_phase=tk.StringVar(value=self.cfg.get("semester2_anchor_phase","знаменник"))
+        ttk.Label(semesterbox,text="Парність цього понеділка:").grid(row=2,column=0,sticky="w",pady=5)
+        ttk.Combobox(semesterbox,textvariable=self.semester2_phase,
+                     values=("чисельник","знаменник"),state="readonly",width=17).grid(row=2,column=1,sticky="w",padx=8)
+        ttk.Label(semesterbox,text="Якщо прапорець вимкнений, чергування йде безперервно з першого семестру.",
+                  foreground="#416079").grid(row=3,column=0,columnspan=3,sticky="w")
+        ttk.Label(tab,text="Канікули: додайте/видаліть будь-який період, без автоматичного планування на ці дні.").pack(anchor="w",pady=(9,3))
         self.holidays=ttk.Treeview(tab,columns=("start","end"),show="headings",height=6)
         for col,label in (("start","Початок"),("end","Кінець")):
             self.holidays.heading(col,text=label);self.holidays.column(col,width=150)
@@ -824,11 +887,25 @@ class SchoolEditor(tk.Toplevel):
         except Exception as ex:
             messagebox.showerror("JPEG",str(ex),parent=self)
 
+    def _save_semester_values(self):
+        self.cfg["semester2_override"]=bool(self.semester2_enabled.get())
+        if self.semester2_enabled.get():
+            start=parse_ui_date(self.semester2_start.get())
+            self.cfg["semester2_start"]=start
+            self.cfg["semester2_anchor_monday"]=start
+            self.cfg["semester2_anchor_phase"]=self.semester2_phase.get()
+        else:
+            # Disabled override doesn't alter previously saved phase data.
+            self.cfg["semester2_anchor_phase"]=self.semester2_phase.get()
+
     def apply_dates(self):
         try:self.cfg.update(self._year_values())
         except ValueError as ex:
             messagebox.showerror("Дати",str(ex),parent=self);return
         self.cfg["anchor_phase"]=self.anchorphase.get()
+        try:self._save_semester_values()
+        except ValueError as ex:
+            messagebox.showerror("Другий семестр",str(ex),parent=self);return
         self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
         self.cfg["meal_break_after"]=int(self.meal_after.get())
         self.cfg["meal_label"]=self.meal_label.get().strip() or "ХАРЧУВАННЯ У ЇДАЛЬНІ"
@@ -856,6 +933,7 @@ class SchoolEditor(tk.Toplevel):
         self.dates["year_end"].set(display_ui_date(end.isoformat()))
         self.dates["anchor_monday"].set(display_ui_date(monday.isoformat()))
         self.anchorphase.set("чисельник")
+        self.semester2_enabled.set(False)
         self.cfg["holidays"]=[]
         for plan in self.plans.values(): plan["needs_review"]=True
         self._is_new_year=True
@@ -895,6 +973,9 @@ class SchoolEditor(tk.Toplevel):
         except ValueError as ex:
             messagebox.showerror("Дати",str(ex),parent=self);return
         self.cfg["anchor_phase"]=self.anchorphase.get()
+        try:self._save_semester_values()
+        except ValueError as ex:
+            messagebox.showerror("Другий семестр",str(ex),parent=self);return
         self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
         self.cfg["meal_break_after"]=int(self.meal_after.get())
         self.cfg["meal_label"]=self.meal_label.get().strip() or "ХАРЧУВАННЯ У ЇДАЛЬНІ"
@@ -915,7 +996,9 @@ class SchoolEditor(tk.Toplevel):
             or self.cfg.get("course_map")!=self.original_cfg.get("course_map")
             or self.cfg.get("holidays")!=self.original_cfg.get("holidays")
             or any(self.cfg.get(k)!=self.original_cfg.get(k)
-                   for k in ("year_start","year_end","anchor_monday","anchor_phase"))
+                   for k in ("year_start","year_end","anchor_monday","anchor_phase",
+                              "semester2_override","semester2_start",
+                              "semester2_anchor_phase","semester2_anchor_monday"))
             or self.plans!=self.original_plans
         )
         message=("Зберегти перевірені зміни розкладу/КТП/року та резервну копію?\\n"

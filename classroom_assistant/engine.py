@@ -40,9 +40,16 @@ def iso_day(s):
 def week_phase(day: date, config=None):
     config = config or read_json("Налаштування.json")
     anchor = iso_day(config["anchor_monday"])
-    # Python floor division supports negative weeks correctly; NEVER freeze during vacations.
-    weeks=(day - timedelta(days=day.weekday())-anchor).days // 7
     anchor_phase=config.get("anchor_phase","чисельник")
+    # Другий семестр: лише ЯВНО дозволений виняток. Без прапорця парність
+    # безперервна, зокрема протягом зимових канікул.
+    if config.get("semester2_override", False):
+        semester_start=iso_day(config["semester2_start"])
+        if day >= semester_start:
+            anchor=iso_day(config["semester2_anchor_monday"])
+            anchor_phase=config["semester2_anchor_phase"]
+    # Канікули не зупиняють парність у межах кожного правила.
+    weeks=(day - timedelta(days=day.weekday())-anchor).days // 7
     return anchor_phase if weeks % 2 == 0 else ("знаменник" if anchor_phase=="чисельник" else "чисельник")
 
 def is_holiday(day: date, config=None):

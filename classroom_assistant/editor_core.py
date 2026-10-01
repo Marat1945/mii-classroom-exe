@@ -134,6 +134,20 @@ def validate_working(config: dict, plans: dict) -> list[str]:
     except (KeyError, ValueError): problems.append("Некоректні дати навчального року")
     if config.get("anchor_phase","чисельник") not in ("чисельник","знаменник"):
         problems.append("Парність опорного тижня повинна бути чисельник/знаменник")
+    if config.get("semester2_override",False):
+        try:
+            second=date.fromisoformat(config["semester2_start"])
+            second_anchor=date.fromisoformat(config["semester2_anchor_monday"])
+            if not start<=second<=end:
+                problems.append("Початок другого семестру за межами навчального року")
+            if second.weekday()!=0 or second_anchor.weekday()!=0:
+                problems.append("Другий семестр і його опорний тиждень мають починатися з понеділка")
+            if second_anchor!=second:
+                problems.append("Опорний понеділок другого семестру має збігатися з його початком")
+            if config.get("semester2_anchor_phase") not in ("чисельник","знаменник"):
+                problems.append("Оберіть чисельник або знаменник для другого семестру")
+        except (KeyError, ValueError):
+            problems.append("Перевірте дати другого семестру")
     if not 1<=len(config.get("period_times",[]))<=12:
         problems.append("Потрібно задати час для 1–12 уроків")
     else:
