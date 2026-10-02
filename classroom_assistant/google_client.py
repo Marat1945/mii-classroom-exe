@@ -60,12 +60,38 @@ def services(with_announcements=False):
         creds=authenticate()
     return build("classroom","v1",credentials=creds,cache_discovery=False),build("drive","v3",credentials=creds,cache_discovery=False)
 
+def credentials_present():
+    """Чи імпортовано файл ключа (OAuth Desktop JSON) вчителя."""
+    return (DATA/"google_credentials.json").is_file()
+
+
+def import_credentials_file(path):
+    """Перевіряє й копіює завантажений із Google Cloud JSON. Помилки — зрозумілою мовою."""
+    import json
+    import shutil
+    try:
+        content=json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError,ValueError) as ex:
+        raise ValueError("Файл не вдалося прочитати як JSON. Оберіть файл, який завантажив Google.") from ex
+    if isinstance(content,dict) and "web" in content and "installed" not in content:
+        raise ValueError("Це ключ типу «Веб-застосунок». Потрібен тип «Комп'ютерний застосунок» "
+                         "(Desktop app): створіть новий ключ за інструкцією, крок 5.")
+    details=content.get("installed") if isinstance(content,dict) else None
+    if not isinstance(details,dict) or not all(k in details for k in ("client_id","auth_uri","token_uri")):
+        raise ValueError("Це не той файл. Потрібен JSON ключа типу «Комп'ютерний застосунок» (Desktop app).")
+    DATA.mkdir(parents=True,exist_ok=True)
+    shutil.copyfile(path,DATA/"google_credentials.json")
+    return DATA/"google_credentials.json"
+
+
 def list_teacher_courses():
     classroom,_=services()
     page=None
     found=[]
     while True:
-        answer=classroom.courses().list(teacherId="me",pageSize=100,pageToken=page).execute()
+        # Лише активні курси: заархівовані минулих років не мають плутатися з поточними.
+        answer=classroom.courses().list(teacherId="me",courseStates=["ACTIVE"],pageSize=100,
+                                        pageToken=page).execute()
         found+=answer.get("courses",[])
         page=answer.get("nextPageToken")
         if not page:break
@@ -141,10 +167,11 @@ def sync_everything(titles,known_ids,progress=None):
     for course in courses:
         by_name.setdefault(course["name"].strip().casefold(),[]).append(course)
     mapped={k:str(v) for k,v in known_ids.items() if str(v) in valid}
-    for title in titles:
-        if title in mapped:continue
-        found=by_name.get(title.strip().casefold(),[])
-        if len(found)==1:mapped[title]=str(found[0]["id"])
+    from .course_match import match_titles
+    # Розумне зіставлення: «10 ІУ» = 10 клас, Історія України; байдуже до регістру,
+    # латинських двійників літер і «Право + ГО». Неоднозначне НЕ вгадується.
+    for title,course in match_titles([t for t in titles if t not in mapped],courses).items():
+        mapped[title]=str(course["id"])
     classroom,drive=services()
     entries={};errors=[]
     unique=list(dict.fromkeys(mapped.values()))

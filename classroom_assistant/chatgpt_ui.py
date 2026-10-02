@@ -77,17 +77,20 @@ class ChatGPTLectureDialog(tk.Toplevel):
         self.previous = ttk.Label(outer, foreground="#2E6B30")
         if self.batch:
             self.previous.pack(anchor="w")
-        steps = ("1) «Відкрити ChatGPT» — запит скопіюється сам  →  2) у ChatGPT натисніть Ctrl+V і "
-                 "Enter  →  3) коли ChatGPT створить файли, завантажте їх (Word і картинку)  →  "
+        steps = ("1) «Відкрити ChatGPT»  →  2) запит вставиться сам, натисніть Enter  →  "
+                 "3) коли ChatGPT створить файли, завантажте їх (Word і ОДНУ картинку)  →  "
                  "4) перетягніть файли з Провідника в рамку нижче (або вставте текст відповіді)  →  "
                  "5) «Прикріпити до уроку».")
         ttk.Label(outer, text=steps, wraplength=940, justify="left",
                   foreground="#33475B").pack(anchor="w", pady=(4, 8))
         bar = ttk.Frame(outer)
         bar.pack(fill="x", pady=(0, 6))
-        AccentButton(bar, "🌐 Відкрити ChatGPT (запит копіюється сам)",
+        AccentButton(bar, "🌐 Відкрити ChatGPT",
                      self.open_chatgpt).pack(side="left")
         ttk.Button(bar, text="📋 Копіювати запит", command=self.copy_prompt).pack(side="left", padx=8)
+        self.mode = "file"
+        self.mode_button = ttk.Button(bar, text="Запасний запит: текстом", command=self.toggle_mode)
+        self.mode_button.pack(side="left")
         self.auto = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="Підхоплювати текстову відповідь з буфера",
                         variable=self.auto).pack(side="left", padx=10)
@@ -213,8 +216,9 @@ class ChatGPTLectureDialog(tk.Toplevel):
             plan_lessons = read_json("Календарні плани.json").get(lesson.plan_id, {}).get("lessons")
         except Exception:
             plan_lessons = None
+        self._plan_lessons = plan_lessons
         self.prompt.delete("1.0", "end")
-        self.prompt.insert("1.0", build_prompt(lesson, plan_lessons))
+        self.prompt.insert("1.0", build_prompt(lesson, plan_lessons, self.mode))
         self.answer.delete("1.0", "end")
         self.answer.edit_modified(False)
         self.clear_files()
@@ -237,6 +241,17 @@ class ChatGPTLectureDialog(tk.Toplevel):
             self.app.state["chatgpt_url"] = url
             save_state(self.app.state)
         return url
+
+    def toggle_mode(self):
+        """Основний запит — готові файли; запасний — відповідь текстом (якщо файли не вдаються)."""
+        self.mode = "text" if self.mode == "file" else "file"
+        self.mode_button.config(text="Основний запит: файли" if self.mode == "text"
+                                else "Запасний запит: текстом")
+        self.prompt.delete("1.0", "end")
+        self.prompt.insert("1.0", build_prompt(self.lesson, getattr(self, "_plan_lessons", None), self.mode))
+        self._set_status("Запасний запит: ChatGPT відповість ТЕКСТОМ; скопіюйте відповідь — "
+                         "вона з'явиться нижче сама." if self.mode == "text" else
+                         "Основний запит: ChatGPT має видати готовий Word і одну картинку.", "#1F4E79")
 
     def _copy_prompt_text(self):
         text = self.prompt.get("1.0", "end-1c").strip()
@@ -611,12 +626,12 @@ class ChatGPTDayDialog(tk.Toplevel):
         self.counter.pack(anchor="w")
         ttk.Label(outer, wraplength=1000, justify="left", foreground="#33475B", text=(
             "Галочка = для цього класу готуємо Word. Зніміть її там, де лекція не потрібна. "
-            "Далі: «Відкрити ChatGPT» (запит вставиться сам)  →  Enter  →  завантажте створені файли "
+            "Далі: «Відкрити ChatGPT»  →  Enter  →  завантажте створені файли "
             "(Word і PNG)  →  перетягніть УСІ файли разом у рамку нижче  →  «Прикріпити всі».")
         ).pack(anchor="w", pady=(2, 6))
         bar = ttk.Frame(outer)
         bar.pack(fill="x", pady=(0, 4))
-        AccentButton(bar, "🌐 Відкрити ChatGPT (запит вставиться сам)", self.open_chatgpt,
+        AccentButton(bar, "🌐 Відкрити ChatGPT", self.open_chatgpt,
                      color="#2E8B57", hover="#3AA36B").pack(side="left")
         ttk.Button(bar, text="📋 Копіювати запит", command=self.copy_prompt).pack(side="left", padx=8)
         ttk.Button(bar, text="☑ Усі", command=lambda: self._set_all(True)).pack(side="left")

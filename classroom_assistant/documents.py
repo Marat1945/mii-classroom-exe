@@ -1,4 +1,5 @@
 """Оформлення Word: Times New Roman 14, кольори, конспект, безпека, Д/з останнім."""
+import re
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor
@@ -70,3 +71,47 @@ def create_word(lesson, destination, material=None):
     path=Path(destination);path.parent.mkdir(exist_ok=True,parents=True)
     doc.save(path)
     return path
+
+
+SAFETY_TEXT=("Під час повітряної тривоги перебувайте в безпечному місці. Жовта тривога також є сигналом "
+             "небезпеки — не ігноруйте її. До навчання повертайтеся лише тоді, коли це безпечно.")
+_HOMEWORK=re.compile(r"^\s*(?:Д/з|Д\.з\.|Домашнє завдання)\s*[:：]",re.I)
+
+
+def _set_text(paragraph,text):
+    if paragraph.runs:
+        paragraph.runs[0].text=text
+        for run in paragraph.runs[1:]:run.text=""
+    else:
+        paragraph.add_run(text)
+
+
+def ensure_closing(doc,lesson):
+    """Завершення, як у вашому зразку: «Техніка безпеки» (рожевий блок) і «Д/з» останнім рядком.
+
+    ChatGPT цього не пише (програма додає сама), а Д/з завжди береться лише з КТП.
+    """
+    homework="Д/з: "+(lesson.homework or "Не зазначено у КТП — уточнити у вчителя.")
+    paragraphs=list(doc.paragraphs)
+    has_safety=any(p.text.strip().casefold()=="техніка безпеки" for p in paragraphs)
+    existing=[p for p in paragraphs if _HOMEWORK.match(p.text)]
+    if not has_safety:
+        for paragraph in existing:                       # зайве Д/з посеред тексту — прибрати
+            paragraph._p.getparent().remove(paragraph._p)
+        existing=[]
+        try:
+            doc.add_heading("Техніка безпеки",1)
+        except KeyError:
+            run=doc.add_paragraph().add_run("Техніка безпеки");run.bold=True
+        table=doc.add_table(rows=1,cols=1)
+        cell=table.cell(0,0)
+        shade_cell=OxmlElement("w:shd");shade_cell.set(qn("w:val"),"clear");shade_cell.set(qn("w:fill"),"FCE8E6")
+        cell._tc.get_or_add_tcPr().append(shade_cell)
+        run=cell.paragraphs[0].add_run(SAFETY_TEXT)
+        run.font.name="Times New Roman";run.font.size=Pt(13.5)
+    if existing:
+        _set_text(existing[-1],homework)
+        return doc
+    run=doc.add_paragraph().add_run(homework)
+    run.bold=True;run.font.name="Times New Roman";run.font.size=Pt(14)
+    return doc

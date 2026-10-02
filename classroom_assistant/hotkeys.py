@@ -33,6 +33,12 @@ def _on_control_key(event):
     widget=event.widget
     if not hasattr(widget,"winfo_toplevel"):return None
     top=widget.winfo_toplevel()
+    if letter in ("z","y") and widget.winfo_class() not in TEXTLIKE:
+        # Ctrl+Z / Ctrl+Y поза полями тексту — «Назад» / «Вперед» у вікні програми.
+        handler=getattr(top,"history_undo" if letter=="z" else "history_redo",None)
+        if handler:
+            handler();return "break"
+        return None
     if letter=="s":
         # Ctrl+S: «зберегти» у вікні, де це підтримано (редактор року).
         top.event_generate("<<SaveAll>>")
@@ -156,6 +162,8 @@ def _show_background_menu(event):
 
 def install_hotkeys(root):
     """Один раз на програму: гарячі клавіші, Esc для діалогів, меню для полів."""
+    from . import dragselect
+    dragselect.install(root)
     root.bind_all("<Control-KeyPress>",_on_control_key,add="+")
     root.bind_all("<Escape>",_on_escape,add="+")
     for cls in ("Entry","TEntry","TCombobox","Text","Spinbox"):

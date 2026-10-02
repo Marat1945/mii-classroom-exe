@@ -138,6 +138,18 @@ def _change_text(paragraph,text):
         for run in paragraph.runs[1:]:run.text=""
     else:paragraph.add_run(text)
 
+def _fix_header_dates(doc,lesson):
+    """У колонтитулах дата уроку стає датою цього класу: «28.09» і «28.09.2026»."""
+    short=lesson.day[8:10]+"."+lesson.day[5:7]
+    full=short+"."+lesson.day[:4]
+    pattern=re.compile(r"\b\d{2}\.\d{2}(\.\d{4})?\b")
+    for section in doc.sections:
+        for part in (section.header,section.footer):
+            for paragraph in part.paragraphs:
+                updated=pattern.sub(lambda m:full if m.group(1) else short,paragraph.text)
+                if updated!=paragraph.text:_change_text(paragraph,updated)
+
+
 def copy_for_lesson(master,lesson):
     """Окрема Word-копія для дати/ДЗ; оригінал не змінюється."""
     source=Path(master)
@@ -161,21 +173,12 @@ def copy_for_lesson(master,lesson):
             _change_text(p,f"Урок № {lesson.lesson_number} • {date_full}")
             found_title=True
             break
-    for section in doc.sections:
-        for part in (section.header,section.footer):
-            for p in part.paragraphs:
-                updated=re.sub(r"\d{2}\.\d{2}\.\d{4}",date_full,p.text)
-                if updated!=p.text:_change_text(p,updated)
+    _fix_header_dates(doc,lesson)
     if not found_title:
         p=doc.paragraphs[0].insert_paragraph_before(heading) if doc.paragraphs else doc.add_paragraph(heading)
         p.style="Heading 1"
-    hw_found=False
-    for p in doc.paragraphs:
-        if re.match(r"^\s*(?:Д/з|Д\.з\.|Домашнє завдання)\s*[:：]",p.text,re.I):
-            _change_text(p,"Д/з: "+(lesson.homework or "не зазначено у календарному плані"))
-            hw_found=True
-    if not hw_found:
-        doc.add_paragraph("Д/з: "+(lesson.homework or "не зазначено у календарному плані"))
+    from .documents import ensure_closing
+    ensure_closing(doc,lesson)
     if output.resolve()!=source.resolve():
         doc.save(output)
     return output

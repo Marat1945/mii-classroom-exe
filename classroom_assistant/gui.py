@@ -1,4 +1,8 @@
 """Вікно локального клієнта. Нічого самовільно не публікує."""
+import hashlib
+import json
+import os
+import sys
 import threading
 import shutil
 from dataclasses import replace as dataclass_replace
@@ -6,7 +10,7 @@ from datetime import date,timedelta,datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
-from .engine import read_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, word_path, html_classroom_text, DATA, ROOT
+from .engine import read_json, write_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, word_path, html_classroom_text, DATA, ROOT
 from .documents import create_word
 from .material_library import (parallel_matches,add_document,attach_document,find_for_lesson,signature_key,signature,stream_subject,check_real_docx,copy_for_lesson)
 from .attachments import add_attachments, files_for_lesson, copy_attachments, remove_attachment
@@ -14,6 +18,9 @@ from .window_ui import maximize_work_window, fit_work_window
 from .ui_kit import AccentButton
 from .hotkeys import install_hotkeys
 from .theme import apply_theme, make_banner
+from .history import History, describe_change
+from .datepicker import pick_date
+from . import data_tools
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     WindowBase = TkinterDnD.Tk
@@ -45,6 +52,10 @@ def render_template(text,lesson):
     return out
 
 
+# Ці ключі стану не відкочуються кнопкою «Назад»: чернетки Google вже створено, курси — з Google.
+NON_UNDOABLE=("drafts","course_ids","classroom_order","chatgpt_url","autopaste","autosend",
+              "autopaste_delay","column_order","blank_offer_37")
+
 WEEKDAYS_UA=("ПОНЕДІЛОК","ВІВТОРОК","СЕРЕДА","ЧЕТВЕР","П’ЯТНИЦЯ","СУБОТА","НЕДІЛЯ")
 
 def weekday_ua(value):
@@ -53,7 +64,7 @@ def weekday_ua(value):
 class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.6")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.7")
         self.geometry("1250x770")
         self.minsize(1060,630)
         maximize_work_window(self)
@@ -70,41 +81,67 @@ class MainApp(WindowBase):
         self.google_courses=[]
         # Дані лише для перегляду, не змінюють локальні КТП і Google-чернетки.
         self.remote_classroom_entries={}
+        self._plans_sig=None;self._plans_digest="";self._plans_store={}
         self._build()
         self.update_day()
+        self.history=History()
+        self.history.reset(self._history_snapshot())
+        self.history_undo=self.undo;self.history_redo=self.redo       # Ctrl+Z / Ctrl+Y
+        self._poll_job=self.after(900,self._history_poll)
         # Одразу після запуску підтягнути актуальний стан Classroom (без вікна входу).
         self.after(1500,lambda:self.sync_classroom(interactive=False))
+        self.after(2600,self._maybe_offer_blank_start)
 
     def _build(self):
         outer=ttk.Frame(self,padding=12)
         outer.pack(fill="both",expand=True)
         hdr=ttk.Frame(outer);hdr.pack(fill="x",pady=(0,8))
-        ttk.Label(hdr,text="Дата (ДД.ММ.РРРР):").pack(side="left")
+        left=ttk.Frame(hdr);right=ttk.Frame(hdr)
+
+        def relayout(_event=None):
+            """Вузький екран: праві кнопки (Назад, Вперед, Зразки, Мої дані) — на другий рядок."""
+            need=left.winfo_reqwidth()+right.winfo_reqwidth()+24
+            left.grid_forget();right.grid_forget()
+            left.grid(row=0,column=0,sticky="w")
+            if hdr.winfo_width()>=need:
+                hdr.columnconfigure(1,weight=1)
+                right.grid(row=0,column=1,sticky="e")
+            else:
+                hdr.columnconfigure(1,weight=0)
+                right.grid(row=1,column=0,sticky="e",pady=(6,0))
+        hdr.bind("<Configure>",relayout)
+        ttk.Label(left,text="Дата (ДД.ММ.РРРР):").pack(side="left")
         self.datevar=tk.StringVar(value=date.today().strftime("%d.%m.%Y"))
         self._date_refresh_id=None
         self.datevar.trace_add("write",self._on_date_text_change)
-        date_entry=ttk.Entry(hdr,width=14,textvariable=self.datevar)
-        date_entry.pack(side="left",padx=6)
+        date_entry=ttk.Entry(left,width=14,textvariable=self.datevar)
+        date_entry.pack(side="left",padx=(6,2))
+        self.date_entry=date_entry
+        ttk.Button(left,text="📅",width=3,command=self.pick_day).pack(side="left",padx=(0,4))
         date_entry.bind("<Return>",lambda _:self.update_day())
-        self.weekday=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"),foreground="#245A7C",width=13)
+        self.weekday=ttk.Label(left,text="",font=("Segoe UI",11,"bold"),foreground="#245A7C",width=13)
         self.weekday.pack(side="left",padx=(5,8))
-        ttk.Button(hdr,text="←",width=4,command=lambda:self.shift(-1)).pack(side="left")
-        ttk.Button(hdr,text="→",width=4,command=lambda:self.shift(1)).pack(side="left")
-        ttk.Button(hdr,text="ПОЧАТКОВЕ НАЛАШТУВАННЯ",
+        ttk.Button(left,text="←",width=4,command=lambda:self.shift(-1)).pack(side="left")
+        ttk.Button(left,text="→",width=4,command=lambda:self.shift(1)).pack(side="left")
+        ttk.Button(left,text="ПОЧАТКОВЕ НАЛАШТУВАННЯ",
                    command=self.setup_dialog).pack(side="left",padx=(16,0))
-        self.phase=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"))
+        self.phase=ttk.Label(left,text="",font=("Segoe UI",11,"bold"))
         self.phase.pack(side="left",padx=15)
-        ttk.Button(hdr,text="Підключити Google / одержати курси",
+        ttk.Button(left,text="Підключити Google / одержати курси",
                    command=self.connect_google).pack(side="left")
-        ttk.Button(hdr,text="🗂 Мої дані",command=self.data_dialog).pack(side="right")
-        ttk.Button(hdr,text="📄 Зразки документів",
+        ttk.Button(right,text="🗂 Мої дані",command=self.data_dialog).pack(side="right")
+        ttk.Button(right,text="📄 Зразки документів",
                    command=self.samples_dialog).pack(side="right",padx=6)
+        self.redo_button=ttk.Button(right,text="↷ Вперед",command=self.redo,state="disabled")
+        self.redo_button.pack(side="right",padx=(0,2))
+        self.undo_button=ttk.Button(right,text="↶ Назад",command=self.undo,state="disabled")
+        self.undo_button.pack(side="right",padx=(8,2))
 
         cols=("№","Час","Потік","Курс Classroom","Тема","КТП","Стан")
         self.grid_columns=cols
         table_frame=ttk.Frame(outer);table_frame.pack(fill="both",expand=True)
         self.grid=ttk.Treeview(table_frame,columns=cols,show="headings",
-                                selectmode="extended",height=11)
+                                selectmode="extended",height=5)
         widths=(43,100,140,160,510,60,150)
         for col,width in zip(cols,widths):
             self.grid.heading(col,text=col)
@@ -171,7 +208,7 @@ class MainApp(WindowBase):
                    command=self.view_classroom).pack(side="right",padx=4)
         ttk.Label(actions3,text="Плани • розклад • бібліотека • дзвоники • допомога").pack(side="left",padx=10)
         ttk.Label(outer,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
-        self.desc=tk.Text(outer,height=13,wrap="word",font=("Segoe UI",10))
+        self.desc=tk.Text(outer,height=5,wrap="word",font=("Segoe UI",10))
         self.desc.pack(fill="both",expand=True)
         self.desc.bind("<Button-3>",self._description_context_menu)
         self.attachment_toolbar=ttk.Frame(outer)
@@ -197,8 +234,13 @@ class MainApp(WindowBase):
                 widget.dnd_bind("<<DropPosition>>",self._highlight_description_drop)
                 widget.dnd_bind("<<DropLeave>>",self._clear_description_drop)
                 widget.dnd_bind("<<Drop>>",self._receive_files)
-        self.foot=ttk.Label(outer,text="Без авторизації Google програма працює локально. Публікацію заборонено.",foreground="#46576b")
-        self.foot.pack(anchor="w",pady=(7,0))
+        bottom=ttk.Frame(outer);bottom.pack(fill="x",pady=(7,0))
+        AccentButton(bottom,"⟲ СКИНУТИ ВСЕ",self.reset_everything,color="#C62828",
+                     hover="#E53935").pack(side="right")
+        ttk.Button(bottom,text="↩ Відновити останню копію",
+                   command=self.restore_last_backup).pack(side="right",padx=8)
+        self.foot=ttk.Label(bottom,text="Без авторизації Google програма працює локально. Публікацію заборонено.",foreground="#46576b")
+        self.foot.pack(side="left",fill="x",expand=True)
 
     def _on_date_text_change(self,*_unused):
         """Відобразити уроки після введення ПОВНОЇ правильної дати."""
@@ -803,7 +845,10 @@ class MainApp(WindowBase):
         self.cfg=read_json("Налаштування.json")
         self.state=read_state()
         self.remote_classroom_entries={}
+        self._plans_sig=None
         self.update_day()
+        self.history.reset(self._history_snapshot())
+        self._history_buttons()
         self.after(400,lambda:self.sync_classroom(interactive=False))
 
     def _open_lesson_menu(self,event):
@@ -1187,9 +1232,166 @@ class MainApp(WindowBase):
         ttk.Button(buttons,text="Зберегти AI-ключ (платний режим)",command=save_key).pack(side="left",padx=5)
         ttk.Button(buttons,text="Закрити",command=dlg.destroy).pack(side="right",padx=5)
 
+    # ---------- Назад / Вперед ----------
+    def _plans_digest_now(self):
+        path=DATA/"Календарні плани.json"
+        try:stat=path.stat()
+        except OSError:return ""
+        signature=(stat.st_mtime_ns,stat.st_size)
+        if signature!=self._plans_sig:
+            text=path.read_text(encoding="utf-8")
+            self._plans_digest=hashlib.sha1(text.encode("utf-8")).hexdigest()
+            self._plans_store[self._plans_digest]=text
+            self._plans_sig=signature
+        return self._plans_digest
+
+    def _history_snapshot(self):
+        core={k:v for k,v in self.state.items() if k not in NON_UNDOABLE}
+        return json.dumps({"cfg":self.cfg,"state":core,"plans":self._plans_digest_now()},
+                          ensure_ascii=False,sort_keys=True)
+
+    def _history_buttons(self):
+        try:
+            self.undo_button.config(state="normal" if self.history.can_undo() else "disabled")
+            self.redo_button.config(state="normal" if self.history.can_redo() else "disabled")
+        except tk.TclError:pass
+
+    def _history_record(self):
+        snapshot=self._history_snapshot()
+        if snapshot!=self.history.current:
+            self.history.record(snapshot,describe_change(self.history.current,snapshot))
+        self._history_buttons()
+
+    def _history_poll(self):
+        try:
+            if not self.winfo_exists():return
+            self._history_record()
+        except tk.TclError:return
+        self._poll_job=self.after(900,self._history_poll)
+
+    def _editor_is_open(self):
+        return any(type(w).__name__=="SchoolEditor" and w.winfo_exists() for w in self.winfo_children())
+
+    def _restore_snapshot(self,snapshot):
+        data=json.loads(snapshot)
+        keep={k:v for k,v in self.state.items() if k in NON_UNDOABLE}
+        state={**data["state"],**keep}
+        write_json("Налаштування.json",data["cfg"])
+        text=self._plans_store.get(data.get("plans",""))
+        if text is not None:
+            (DATA/"Календарні плани.json").write_text(text,encoding="utf-8")
+            self._plans_sig=None
+        save_state(state)
+        self.cfg,self.state=data["cfg"],state
+        self.update_day()
+        self.history.replace_current(self._history_snapshot())
+        self._history_buttons()
+
+    def undo(self):
+        if self._editor_is_open():
+            messagebox.showinfo("Назад","Спершу закрийте редактор: у ньому є власні кнопки «Назад» і «Вперед».")
+            return "break"
+        self._history_record()
+        step=self.history.undo()
+        if not step:
+            self.foot.config(text="Немає що скасовувати.");return "break"
+        self._restore_snapshot(step[0])
+        self.foot.config(text=f"Скасовано: {step[1]}. «Вперед» поверне назад.")
+        return "break"
+
+    def redo(self):
+        if self._editor_is_open():
+            messagebox.showinfo("Вперед","Спершу закрийте редактор: у ньому є власні кнопки «Назад» і «Вперед».")
+            return "break"
+        self._history_record()
+        step=self.history.redo()
+        if not step:
+            self.foot.config(text="Немає що повертати.");return "break"
+        self._restore_snapshot(step[0])
+        self.foot.config(text=f"Повернуто: {step[1]}.")
+        return "break"
+
+    def destroy(self):
+        job=getattr(self,"_poll_job",None)
+        if job:
+            try:self.after_cancel(job)
+            except tk.TclError:pass
+        super().destroy()
+
+    def pick_day(self):
+        chosen=pick_date(self.date_entry,self.datevar.get(),title="Дата уроків")
+        if chosen:
+            self.datevar.set(chosen);self.update_day()
+
+    # ---------- Скинути все / відновити копію ----------
+    def reset_everything(self):
+        if not messagebox.askyesno("Скинути ВСЕ?",
+                "Буде видалено розклад, класи, календарні плани, готові Word, вкладення та весь стан програми.\n\n"
+                "Підключення до Google збережеться.\n\n"
+                "ПЕРЕД цим програма сама збереже повну копію всього; кнопка «↩ Відновити останню копію» "
+                "поверне все назад.\n\nСкинути все?",icon="warning",default="no"):
+            return
+        path=data_tools.auto_backup_path(data_tools.RESET_PREFIX)
+        try:
+            data_tools.reset_to_blank(path)
+        except Exception as ex:
+            messagebox.showerror("Скинути все",f"Не вдалося: {ex}\nЯкщо копію не створено, дані не змінено.")
+            return
+        self.reload_data()
+        messagebox.showinfo("Готово",f"Усе скинуто. Повну копію збережено:\n{path}\n\n"
+                            "Повернути все: кнопка «↩ Відновити останню копію».")
+
+    def restore_last_backup(self):
+        latest=data_tools.latest_backup()
+        if latest is None:
+            messagebox.showinfo("Копії",
+                "Автоматичних копій ще немає: її створює кнопка «Скинути все».\n"
+                "Свої копії можна відновити через «Мої дані» → «Відновити з копії».")
+            return
+        when=datetime.fromtimestamp(latest.stat().st_mtime).strftime("%d.%m.%Y %H:%M")
+        if not messagebox.askyesno("Відновити останню копію",
+                f"Відновити дані з копії від {when}?\n{latest.name}\n\n"
+                "Поточний стан перед цим буде збережено в окрему копію.",default="no"):
+            return
+        safety=data_tools.auto_backup_path("Стан перед відновленням")
+        try:
+            count=data_tools.restore_from_zip(latest,safety)
+        except Exception as ex:
+            messagebox.showerror("Відновлення",str(ex));return
+        self.reload_data()
+        messagebox.showinfo("Відновлено",f"Відновлено файлів: {count}.")
+
+    def _maybe_offer_blank_start(self):
+        """Один раз після оновлення: запропонувати чистий старт (лише в зібраній EXE-програмі)."""
+        if os.environ.get("POMICHNYK_NO_OFFERS") or not getattr(sys,"frozen",False):return
+        if self.state.get("blank_offer_37"):return
+        has_data=bool(self.cfg.get("course_map")) or self._plans_text_has_plans()
+        if has_data and messagebox.askyesno("Чиста версія для перевірки",
+                "Ця версія призначена для перевірки «з нуля»: розклад і КТП ви завантажуєте самі, "
+                "а класи підтягуються з Classroom.\n\n"
+                "Зараз у програмі є ваші старі розклад і КТП. Очистити їх?\n\n"
+                "Перед очищенням програма автоматично збереже ПОВНУ копію; кнопка "
+                "«↩ Відновити останню копію» поверне все.",default="no"):
+            try:
+                data_tools.reset_to_blank(data_tools.auto_backup_path(data_tools.RESET_PREFIX))
+                self.reload_data()
+            except Exception as ex:
+                messagebox.showerror("Очищення",str(ex));return
+        self.state["blank_offer_37"]=True
+        save_state(self.state)
+
+    def _plans_text_has_plans(self):
+        self._plans_digest_now()
+        return self._plans_store.get(self._plans_digest,"").strip() not in ("","{}")
+
     def connect_google(self):
-        """Кнопка зверху: вхід у Google (за потреби) і та сама синхронізація, що при запуску."""
-        self.sync_classroom(interactive=True)
+        """Перший раз — покрокова інструкція з підключення; далі — лише оновлення з Classroom."""
+        from . import google_client
+        if google_client.token_ready():
+            self.sync_classroom(interactive=True)
+            return
+        from .google_setup_ui import show_google_wizard
+        show_google_wizard(self)
 
     def sync_classroom(self,interactive=False,manual=False):
         """Курси (у порядку Classroom) + стан усіх наявних матеріалів. Лише читання."""
@@ -1289,8 +1491,10 @@ class MainApp(WindowBase):
             target=known_ids.get(title)
             matched=next((choice for choice,c in zip(choices[1:],self.google_courses) if str(c["id"])==str(target)),None)
             if not matched:
-                exact=[choice for choice,c in zip(choices[1:],self.google_courses) if c["name"].strip().casefold()==title.strip().casefold()]
-                matched=exact[0] if len(exact)==1 else choices[0]
+                from .course_match import best_match
+                hit=best_match(title,[c["name"] for c in self.google_courses])
+                matched=(next((choice for choice,c in zip(choices[1:],self.google_courses)
+                               if c["name"]==hit),choices[0]) if hit else choices[0])
             box.set(matched);box.grid(row=i,column=1,padx=7,pady=4,sticky="ew")
             vars[title]=var
         def save():

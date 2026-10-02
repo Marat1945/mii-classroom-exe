@@ -59,7 +59,8 @@ class ChatGPTBridgeTests(unittest.TestCase):
         self.assertIn("Історія України", prompt)
         self.assertIn("№14", prompt)
         self.assertIn(f"КОД УРОКУ: {self.code}", prompt)
-        self.assertIn(f"## {NOTEBOOK_HEADING}", prompt)
+        self.assertIn(f"## {NOTEBOOK_HEADING}", build_prompt(self.lesson, None, "text"))   # запасний запит
+        self.assertNotIn("## Назва першого розділу", prompt)                                # основний — лише файли
         self.assertIn("НЕ пиши привітання, домашнє завдання", prompt)
         self.assertNotIn("Zoom у зв", prompt)
 

@@ -12,16 +12,26 @@ import os
 import sys
 import shutil
 
+def ensure_default_data(data_dir):
+    """Створює порожні розклад і КТП, лише якщо їх ще немає (існуючі дані не чіпає)."""
+    from .blank_data import blank_config
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    settings = data_dir / "Налаштування.json"
+    if not settings.exists():
+        settings.write_text(json.dumps(blank_config(), ensure_ascii=False, indent=2), encoding="utf-8")
+    plans = data_dir / "Календарні плани.json"
+    if not plans.exists():
+        plans.write_text("{}", encoding="utf-8")
+
+
 if getattr(sys, "frozen", False):
     ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "PomichnykUchyteliaClassroom"
     DATA = ROOT / "data"
     DATA.mkdir(parents=True, exist_ok=True)
-    packed_data = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "data"
     # Користувацькі налаштування та OAuth-токени НІКОЛИ не перезаписуються.
-    for bundled_name in ("Налаштування.json", "Календарні плани.json"):
-        target = DATA / bundled_name
-        if not target.exists():
-            shutil.copy2(packed_data / bundled_name, target)
+    # Нова установка = ПОРОЖНЯ програма: розклад і КТП вчитель завантажує сам.
+    ensure_default_data(DATA)
 else:
     ROOT = Path(__file__).resolve().parent.parent
     DATA = ROOT / "data"

@@ -5,25 +5,21 @@
 """
 from __future__ import annotations
 
-import copy
 import json
 import shutil
 import zipfile
-from datetime import date, timedelta
+from datetime import datetime
 from pathlib import Path
 
+from .blank_data import BELLS, blank_config  # noqa: F401
 from .engine import DATA, ROOT
 
 SKIP_DIRS = {".git", ".github", "classroom_assistant", "tests", "__pycache__", "build", "dist",
-             "venv", ".venv", ".pytest_cache"}
+             "venv", ".venv", ".pytest_cache", "Резервні копії"}
 SECRET_NAMES = {"google_credentials.json", "credentials.json", "token.json"}
 # Що вважається «даними вчителя» і очищується разом із розкладом та КТП.
 WIPE_DIRS = ("Готові Word", "Вкладення Classroom", "Бібліотека уроків")
 RESTORE_DIRS = WIPE_DIRS + ("data", "Архів навчальних даних", "КТП джерела")
-BELLS = [["08:30", "09:15"], ["09:30", "10:15"], ["10:30", "11:15"], ["11:35", "12:20"],
-         ["12:40", "13:25"], ["13:30", "14:15"], ["14:20", "15:05"], ["15:10", "15:55"]]
-
-
 def is_secret(path: Path) -> bool:
     name = path.name.casefold()
     return name in SECRET_NAMES or "token" in name or name.endswith((".pem", ".key", ".env"))
@@ -50,29 +46,6 @@ def export_all_data(destination, root: Path = ROOT) -> int:
             archive.write(path, path.relative_to(root).as_posix())
             count += 1
     return count
-
-
-def blank_config(today: date | None = None, keep: dict | None = None) -> dict:
-    """Порожня, але робоча конфігурація: без класів, розкладу, канікул і КТП."""
-    today = today or date.today()
-    first_year = today.year if today.month >= 7 else today.year - 1
-    start = date(first_year, 9, 1)
-    end = date(first_year + 1, 5, 31)
-    anchor = start - timedelta(days=start.weekday())
-    config = {
-        "year_start": start.isoformat(), "year_end": end.isoformat(),
-        "anchor_monday": anchor.isoformat(), "anchor_phase": "чисельник",
-        "holidays": [], "period_times": copy.deepcopy(BELLS),
-        "days": {str(day): [[None, None] for _ in BELLS] for day in range(5)},
-        "course_map": {}, "classroom_course_titles": [], "google_course_ids": {},
-        "video_links": {}, "ai_model": "gpt-5",
-        "meal_break_after": 2, "meal_label": "ХАРЧУВАННЯ У ЇДАЛЬНІ",
-        "print_bells": True, "print_meal": True, "print_numbers": True,
-    }
-    for name in ("ai_model",):
-        if keep and name in keep:
-            config[name] = keep[name]
-    return config
 
 
 def _write_json(path: Path, data):
@@ -125,3 +98,27 @@ def restore_from_zip(zip_path, safety_zip, root: Path = ROOT) -> int:
             with archive.open(info) as source, open(target, "wb") as out:
                 shutil.copyfileobj(source, out)
     return len(planned)
+
+
+BACKUP_FOLDER = "Резервні копії"
+RESET_PREFIX = "Копія перед скиданням"
+
+
+def backup_dir(root: Path = ROOT) -> Path:
+    return root / BACKUP_FOLDER
+
+
+def auto_backup_path(prefix: str, root: Path = ROOT) -> Path:
+    folder = backup_dir(root)
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{prefix} {datetime.now():%Y-%m-%d %H-%M-%S}.zip"
+
+
+def latest_backup(root: Path = ROOT, prefix: str | None = RESET_PREFIX):
+    """Остання автоматична копія (за замовчуванням — створена перед скиданням) або None."""
+    folder = backup_dir(root)
+    if not folder.is_dir():
+        return None
+    files = [p for p in folder.glob("*.zip") if p.is_file()]
+    chosen = [p for p in files if prefix and p.name.startswith(prefix)] or files
+    return max(chosen, key=lambda p: p.stat().st_mtime, default=None)
