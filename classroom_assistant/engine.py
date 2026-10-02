@@ -38,7 +38,7 @@ def iso_day(s):
     return date.fromisoformat(s)
 
 def week_phase(day: date, config=None):
-    config = config or read_json("Налаштування.json")
+    config = read_json("Налаштування.json") if config is None else config
     anchor = iso_day(config["anchor_monday"])
     anchor_phase=config.get("anchor_phase","чисельник")
     # Другий семестр: лише ЯВНО дозволений виняток. Без прапорця парність
@@ -53,7 +53,7 @@ def week_phase(day: date, config=None):
     return anchor_phase if weeks % 2 == 0 else ("знаменник" if anchor_phase=="чисельник" else "чисельник")
 
 def is_holiday(day: date, config=None):
-    config=config or read_json("Налаштування.json")
+    config=read_json("Налаштування.json") if config is None else config
     return any(iso_day(i["start"]) <= day <= iso_day(i["end"]) for i in config["holidays"])
 
 def slot_key(day, period, stream):
@@ -79,8 +79,8 @@ class Lesson:
         return f"{self.day}|{self.period}|{self.stream}"
 
 def build_calendar(config=None, plans=None, until=None):
-    config=config or read_json("Налаштування.json")
-    plans=plans or read_json("Календарні плани.json")
+    config=read_json("Налаштування.json") if config is None else config
+    plans=read_json("Календарні плани.json") if plans is None else plans
     start=iso_day(config["year_start"])
     end=iso_day(config["year_end"])
     if until:
@@ -123,8 +123,8 @@ def day_lessons(day: str, config=None, plans=None):
     return [i for i in build_calendar(config, plans, until=day) if i.day==day]
 
 def check_configuration(config=None,plans=None):
-    config=config or read_json("Налаштування.json")
-    plans=plans or read_json("Календарні плани.json")
+    config=read_json("Налаштування.json") if config is None else config
+    plans=read_json("Календарні плани.json") if plans is None else plans
     warnings=[]
     for day, periods in config["days"].items():
         if len(periods)!=len(config["period_times"]): warnings.append(f"День {day}: число уроків не збігається з налаштуванням дзвоників")

@@ -17,6 +17,7 @@ from .chatgpt_bridge import (DEFAULT_CHATGPT_URL, best_lesson_for_file, build_pr
                              lesson_code, looks_like_answer, match_score, parse_answer,
                              safe_chatgpt_url)
 from .ui_kit import AccentButton
+from . import autopaste
 try:
     from tkinterdnd2 import DND_FILES
 except ImportError:
@@ -97,6 +98,7 @@ class ChatGPTLectureDialog(tk.Toplevel):
         self.url.trace_add("write", lambda *_: self._save_url_if_valid())
         ttk.Label(bar2, text="Адреса ChatGPT (можна посилання на свій проєкт):").pack(side="left")
         ttk.Entry(bar2, textvariable=self.url).pack(side="left", fill="x", expand=True, padx=6)
+        autopaste.build_controls(outer, self.app.state, save_state).pack(fill="x", pady=(0, 6))
 
         panes = ttk.PanedWindow(outer, orient="vertical")
         panes.pack(fill="both", expand=True)
@@ -105,7 +107,7 @@ class ChatGPTLectureDialog(tk.Toplevel):
         panes.add(bottom, weight=3)
         ttk.Label(top, text="Запит для ChatGPT (за бажанням допишіть, напр., автора підручника):"
                   ).pack(anchor="w")
-        self.prompt = ScrolledText(top, wrap="word", height=10, font=("Segoe UI", 10))
+        self.prompt = ScrolledText(top, wrap="word", height=5, font=("Segoe UI", 10))
         self.prompt.pack(fill="both", expand=True)
         self.drop_label = tk.Label(
             bottom, bg="#EAF2FA", fg="#164F82", relief="groove", bd=2, pady=12,
@@ -121,7 +123,7 @@ class ChatGPTLectureDialog(tk.Toplevel):
         ttk.Button(row, text="Очистити файли", command=self.clear_files).pack(side="right", padx=6)
         ttk.Label(bottom, text="…або відповідь ChatGPT текстом (якщо файли не створено):"
                   ).pack(anchor="w", pady=(4, 0))
-        self.answer = ScrolledText(bottom, wrap="word", height=7, font=("Segoe UI", 10))
+        self.answer = ScrolledText(bottom, wrap="word", height=4, font=("Segoe UI", 10))
         self.answer.pack(fill="both", expand=True)
         self._setup_drop()
         for widget in (self.prompt, self.answer):
@@ -259,8 +261,10 @@ class ChatGPTLectureDialog(tk.Toplevel):
         try:
             webbrowser.open(url)
             if copy:
-                self._set_status("ChatGPT відкрито, запит УЖЕ скопійовано: у ChatGPT натисніть Ctrl+V "
-                                 "(у полі повідомлення) і Enter.", "#1F4E79")
+                self._set_status("ChatGPT відкрито, запит УЖЕ скопійовано.", "#1F4E79")
+            self._auto = autopaste.start_autopaste(
+                self, self.app.state, self._copy_prompt_text,
+                lambda text: self._set_status(text, "#1F4E79"))
         except Exception as ex:   # браузер недоступний — запит усе одно в буфері
             messagebox.showwarning("ChatGPT", f"Не вдалося відкрити браузер: {ex}\n"
                                    f"Відкрийте вручну: {url}", parent=self)
@@ -532,6 +536,9 @@ class ChatGPTLectureDialog(tk.Toplevel):
 
     def close(self):
         self._closing = True
+        auto = getattr(self, "_auto", None)
+        if auto is not None:
+            auto.finished = True
         self._save_url_if_valid()
         for job in (self._poll_job, self._parse_job):
             if job:
@@ -562,10 +569,12 @@ def build_day_prompt(lessons):
     lines = [
         f"{PROMPT_MARKER} — лекції на весь день ({total} " + ("урок" if total == 1 else "уроків") + ")",
         "",
-        "Нижче "+str(total)+" окремих завдань — по одному на кожен урок. Виконай їх ПОСЛІДОВНО. "
-        "Для КОЖНОГО уроку створи його власні два файли (Word і PNG-інфографіка) з ТОЧНИМИ іменами, "
-        "вказаними в завданні. Після всіх завдань напиши в чаті по одному рядку на урок: "
-        "«Готово. КОД УРОКУ: …» — і дай посилання на всі файли. Лекції в чат не переписуй.",
+        "Нижче "+str(total)+" окремих завдань — по одному на кожен урок. НЕ став уточнювальних "
+        "запитань і не чекай підтвердження: виконай їх ПІДРЯД. "
+        "Для КОЖНОГО уроку створи його власні два файли (справжній Word з текстом — НЕ картинку — і "
+        "PNG-інфографіку) з ТОЧНИМИ іменами, вказаними в завданні. Після всіх завдань напиши в чаті "
+        "по одному рядку на урок: «Готово. КОД УРОКУ: …» — і дай посилання на всі файли. "
+        "Лекції в чат не переписуй.",
         "",
     ]
     for number, lesson in enumerate(lessons, 1):
@@ -576,16 +585,16 @@ def build_day_prompt(lessons):
 
 
 class ChatGPTDayDialog(tk.Toplevel):
-    """Усі лекції дня одним запитом; готові файли перетягуються разом і розкладаються по уроках."""
+    """Усі лекції дня одним запитом. Галочками можна зняти клас, для якого Word не потрібен."""
 
     def __init__(self, app, lessons):
         super().__init__(app)
         self.app = app
         self.lessons = list(lessons)
+        self.checked = set(range(len(self.lessons)))
         self.docx = {}            # індекс уроку → шлях до Word
         self.images = {}          # індекс уроку → список зображень
         self.unassigned = []
-        self._opened = False
         self.escape_closes = True
         day = self.lessons[0].day
         self.title(f"Лекції ГПТ на весь день — {day[8:10]}.{day[5:7]}.{day[:4]}")
@@ -593,42 +602,52 @@ class ChatGPTDayDialog(tk.Toplevel):
         self.transient(app)
         self._build()
         self.refresh()
+        self._rebuild_prompt()
 
     def _build(self):
         outer = ttk.Frame(self, padding=12)
         outer.pack(fill="both", expand=True)
-        ttk.Label(outer, font=("Segoe UI", 12, "bold"), foreground="#1F4E79",
-                  text=f"Уроків, для яких потрібна лекція: {len(self.lessons)}").pack(anchor="w")
+        self.counter = ttk.Label(outer, font=("Segoe UI", 12, "bold"), foreground="#1F4E79")
+        self.counter.pack(anchor="w")
         ttk.Label(outer, wraplength=1000, justify="left", foreground="#33475B", text=(
-            "1) «Відкрити ChatGPT» — спільний запит скопіюється сам  →  2) у ChatGPT Ctrl+V і Enter  →  "
-            "3) завантажте всі створені файли (Word і PNG)  →  4) перетягніть УСІ файли разом у рамку "
-            "нижче — програма розкладе їх по уроках  →  5) «Прикріпити всі».")).pack(anchor="w", pady=(2, 6))
+            "Галочка = для цього класу готуємо Word. Зніміть її там, де лекція не потрібна. "
+            "Далі: «Відкрити ChatGPT» (запит вставиться сам)  →  Enter  →  завантажте створені файли "
+            "(Word і PNG)  →  перетягніть УСІ файли разом у рамку нижче  →  «Прикріпити всі».")
+        ).pack(anchor="w", pady=(2, 6))
         bar = ttk.Frame(outer)
-        bar.pack(fill="x", pady=(0, 6))
-        AccentButton(bar, "🌐 Відкрити ChatGPT (запит копіюється сам)", self.open_chatgpt,
+        bar.pack(fill="x", pady=(0, 4))
+        AccentButton(bar, "🌐 Відкрити ChatGPT (запит вставиться сам)", self.open_chatgpt,
                      color="#2E8B57", hover="#3AA36B").pack(side="left")
         ttk.Button(bar, text="📋 Копіювати запит", command=self.copy_prompt).pack(side="left", padx=8)
+        ttk.Button(bar, text="☑ Усі", command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(bar, text="☐ Жодного", command=lambda: self._set_all(False)).pack(side="left", padx=4)
+        bar2 = ttk.Frame(outer)
+        bar2.pack(fill="x", pady=(0, 4))
         self.url = tk.StringVar(value=safe_chatgpt_url(
             self.app.state.get("chatgpt_url", DEFAULT_CHATGPT_URL)))
         self.url.trace_add("write", lambda *_: self._save_url())
-        ttk.Entry(bar, textvariable=self.url, width=34).pack(side="right")
-        ttk.Label(bar, text="Адреса ChatGPT:").pack(side="right", padx=4)
+        ttk.Label(bar2, text="Адреса ChatGPT:").pack(side="left")
+        ttk.Entry(bar2, textvariable=self.url).pack(side="left", fill="x", expand=True, padx=6)
+        autopaste.build_controls(outer, self.app.state, save_state).pack(fill="x", pady=(0, 6))
 
-        columns = ("num", "stream", "topic", "word", "pictures")
-        self.table = ttk.Treeview(outer, columns=columns, show="headings", height=6)
-        for name, title, width in (("num", "КТП №", 60), ("stream", "Потік", 150),
-                                   ("topic", "Тема", 520), ("word", "Word", 90),
-                                   ("pictures", "Зображення", 100)):
+        columns = ("use", "num", "stream", "topic", "spread", "word", "pictures")
+        self.table = ttk.Treeview(outer, columns=columns, show="headings", height=5,
+                                  selectmode="browse")
+        for name, title, width in (("use", "Word?", 60), ("num", "КТП №", 60), ("stream", "Потік", 150),
+                                   ("topic", "Тема", 400), ("spread", "Охоплює (уроків)", 130),
+                                   ("word", "Word", 70), ("pictures", "Зображення", 90)):
             self.table.heading(name, text=title)
-            self.table.column(name, width=width, anchor="w")
+            self.table.column(name, width=width, anchor="w" if name == "topic" else "center")
         self.table.pack(fill="x")
+        self.table.bind("<Button-1>", self._click)
+        self.table.bind("<space>", self._space)
+        self.table.bind("<Double-1>", self._double)
         panes = ttk.PanedWindow(outer, orient="vertical")
         panes.pack(fill="both", expand=True, pady=(8, 0))
         top, bottom = ttk.Frame(panes), ttk.Frame(panes)
         panes.add(top, weight=2)
         panes.add(bottom, weight=2)
-        self.prompt = ScrolledText(top, wrap="word", height=6, font=("Segoe UI", 9))
-        self.prompt.insert("1.0", build_day_prompt(self.lessons))
+        self.prompt = ScrolledText(top, wrap="word", height=3, font=("Segoe UI", 9))
         self.prompt.pack(fill="both", expand=True)
         self.drop_label = tk.Label(
             bottom, bg="#EAF2FA", fg="#164F82", relief="groove", bd=2, pady=14,
@@ -643,7 +662,7 @@ class ChatGPTDayDialog(tk.Toplevel):
         ttk.Button(row, text="Додати файли…", command=self.pick_files).pack(side="right")
         ttk.Label(bottom, text="Файли, які не вдалося розпізнати (двічі клацніть, щоб вибрати урок):"
                   ).pack(anchor="w")
-        self.unknown = tk.Listbox(bottom, height=3)
+        self.unknown = tk.Listbox(bottom, height=2)
         self.unknown.pack(fill="both", expand=True)
         self.unknown.bind("<Double-1>", self._assign_menu)
         if DND_FILES:
@@ -656,6 +675,50 @@ class ChatGPTDayDialog(tk.Toplevel):
         buttons.pack(fill="x", pady=(8, 0))
         AccentButton(buttons, "✅ Прикріпити всі", self.attach_all).pack(side="left")
         ttk.Button(buttons, text="Закрити", command=self.close).pack(side="right")
+
+    # ---- вибір уроків ----
+    def active_lessons(self):
+        return [self.lessons[i] for i in sorted(self.checked)]
+
+    def _toggle(self, index):
+        if index in self.checked:
+            self.checked.discard(index)
+        else:
+            self.checked.add(index)
+        self.refresh()
+        self._rebuild_prompt()
+
+    def _set_all(self, value):
+        self.checked = set(range(len(self.lessons))) if value else set()
+        self.refresh()
+        self._rebuild_prompt()
+
+    def _click(self, event):
+        if self.table.identify_region(event.x, event.y) != "cell":
+            return None
+        row = self.table.identify_row(event.y)
+        if row and self.table.identify_column(event.x) == "#1":
+            self._toggle(int(row))
+            return "break"
+        return None
+
+    def _double(self, event):
+        row = self.table.identify_row(event.y)
+        if row and self.table.identify_column(event.x) != "#1":
+            self._toggle(int(row))
+        return "break"
+
+    def _space(self, _event=None):
+        selected = self.table.selection()
+        if selected:
+            self._toggle(int(selected[0]))
+        return "break"
+
+    def _rebuild_prompt(self):
+        active = self.active_lessons()
+        self.prompt.delete("1.0", "end")
+        self.prompt.insert("1.0", build_day_prompt(active) if active else
+                           "Не вибрано жодного класу: поставте галочку «Word?» біля потрібних уроків.")
 
     # ---- запит ----
     def _save_url(self):
@@ -673,17 +736,26 @@ class ChatGPTDayDialog(tk.Toplevel):
         self.clipboard_append(self.prompt.get("1.0", "end-1c").strip())
         self.update_idletasks()
 
+    def _say(self, text):
+        self.note.config(text=text, foreground="#1F4E79")
+
     def copy_prompt(self):
+        if not self.checked:
+            messagebox.showinfo("Лекції", "Не вибрано жодного класу.", parent=self)
+            return
         self._copy()
-        self.note.config(text="Запит скопійовано. У ChatGPT натисніть Ctrl+V і Enter.", foreground="#1F4E79")
+        self._say("Запит скопійовано. У ChatGPT натисніть Ctrl+V і Enter.")
 
     def open_chatgpt(self):
+        if not self.checked:
+            messagebox.showinfo("Лекції", "Не вибрано жодного класу: поставте галочку «Word?».", parent=self)
+            return
         self._copy()
         url = safe_chatgpt_url(self.url.get())
         try:
             webbrowser.open(url)
-            self.note.config(text="ChatGPT відкрито, запит УЖЕ скопійовано: Ctrl+V у полі повідомлення і Enter.",
-                             foreground="#1F4E79")
+            self._say("ChatGPT відкрито, запит УЖЕ скопійовано.")
+            self._auto = autopaste.start_autopaste(self, self.app.state, self._copy, self._say)
         except Exception as ex:
             messagebox.showwarning("ChatGPT", f"Не вдалося відкрити браузер: {ex}\n{url}", parent=self)
 
@@ -762,18 +834,26 @@ class ChatGPTDayDialog(tk.Toplevel):
         menu.grab_release()
 
     def refresh(self):
+        selected = self.table.selection()
         for item in self.table.get_children():
             self.table.delete(item)
         for index, lesson in enumerate(self.lessons):
+            try:
+                spread = len(self.app._parallel(lesson))
+            except Exception:
+                spread = "—"
             self.table.insert("", "end", iid=str(index), values=(
-                lesson.lesson_number, lesson.stream, lesson.topic[:110],
-                "✅" if index in self.docx else "—",
+                "☑" if index in self.checked else "☐", lesson.lesson_number, lesson.stream,
+                lesson.topic[:110], spread, "✅" if index in self.docx else "—",
                 len(self.images.get(index, [])) or "—"))
+        if selected and self.table.exists(selected[0]):
+            self.table.selection_set(selected[0])
         self.unknown.delete(0, "end")
         for path in self.unassigned:
             self.unknown.insert("end", path.name)
+        self.counter.config(text=f"Вибрано для лекції: {len(self.checked)} з {len(self.lessons)}")
         ready = len(self.docx)
-        self.note.config(text=f"Розпізнано Word: {ready} з {len(self.lessons)}."
+        self.note.config(text=f"Розпізнано Word: {ready}."
                          + (f" Нерозпізнаних файлів: {len(self.unassigned)}." if self.unassigned else ""),
                          foreground="#2E6B30" if ready else "#33475B")
 
@@ -796,9 +876,10 @@ class ChatGPTDayDialog(tk.Toplevel):
                                 "або підтверджений Word.")
             if skipped:
                 warnings.append(f"{lesson.stream}: {skipped}")
-        text = f"Прикріплено лекцій: {done} з {len(self.lessons)}."
-        if len(self.docx) < len(self.lessons):
-            text += f"\nБез Word залишилось уроків: {len(self.lessons) - len(self.docx)}."
+        text = f"Прикріплено лекцій: {done}."
+        waiting = [self.lessons[i].stream for i in sorted(self.checked) if i not in self.docx]
+        if waiting:
+            text += "\nЗалишились без Word (позначені, але файлу немає): " + ", ".join(waiting[:8])
         if warnings:
             text += "\n\n" + "\n".join(warnings[:6])
         messagebox.showinfo("Лекції за день", text + "\n\nУ Classroom нічого не створено. "
@@ -806,6 +887,9 @@ class ChatGPTDayDialog(tk.Toplevel):
         self.close()
 
     def close(self):
+        auto = getattr(self, "_auto", None)
+        if auto is not None:
+            auto.finished = True
         self._save_url()
         try:
             self.destroy()

@@ -97,11 +97,71 @@ def _show_text_menu(event):
     finally:menu.grab_release()
 
 
+LISTLIKE=("Treeview","Listbox")
+BACKGROUND=("TFrame","Frame","TLabel","Label","Canvas","TNotebook","Toplevel","Tk","TPanedwindow")
+
+
+def _selected_text(widget):
+    cls=widget.winfo_class()
+    if cls=="Treeview":
+        rows=["\t".join(str(v) for v in widget.item(i,"values")) for i in widget.selection()]
+    else:
+        rows=[widget.get(i) for i in widget.curselection()]
+    return "\n".join(rows)
+
+
+def _copy_selected(widget):
+    text=_selected_text(widget)
+    if text:
+        widget.clipboard_clear()
+        widget.clipboard_append(text)
+        return "break"
+    return None
+
+
+def _select_all(widget):
+    if widget.winfo_class()=="Treeview":
+        widget.selection_set(widget.get_children())
+    else:
+        widget.selection_set(0,"end")
+
+
+def _show_list_menu(event):
+    """Запасне меню для будь-якого списку чи таблиці, що не має власного."""
+    widget=event.widget
+    if not hasattr(widget,"bind") or widget.bind("<Button-3>"):return
+    menu=tk.Menu(widget,tearoff=False)
+    menu.add_command(label="Копіювати вибране (Ctrl+C)",command=lambda:_copy_selected(widget))
+    menu.add_command(label="Виділити все (Ctrl+A)",command=lambda:_select_all(widget))
+    try:menu.tk_popup(event.x_root,event.y_root)
+    finally:menu.grab_release()
+
+
+def _show_background_menu(event):
+    """Праве натискання на порожньому місці вікна: меню вікна або «Закрити»."""
+    widget=event.widget
+    if not hasattr(widget,"winfo_class") or widget.winfo_class() not in BACKGROUND:return
+    if widget.bind("<Button-3>"):return
+    top=widget.winfo_toplevel()
+    builder=getattr(top,"background_menu",None)
+    if builder:
+        return builder(event)
+    if top.winfo_class()=="Tk":
+        return
+    menu=tk.Menu(top,tearoff=False)
+    menu.add_command(label="Закрити це вікно (Esc)",command=top.destroy)
+    try:menu.tk_popup(event.x_root,event.y_root)
+    finally:menu.grab_release()
+
+
 def install_hotkeys(root):
     """Один раз на програму: гарячі клавіші, Esc для діалогів, меню для полів."""
     root.bind_all("<Control-KeyPress>",_on_control_key,add="+")
     root.bind_all("<Escape>",_on_escape,add="+")
     for cls in ("Entry","TEntry","TCombobox","Text","Spinbox"):
         root.bind_class(cls,"<Button-3>",_show_text_menu,add="+")
+    for cls in LISTLIKE:
+        root.bind_class(cls,"<Button-3>",_show_list_menu,add="+")
+    root.bind_all("<Button-3>",_show_background_menu,add="+")
     try:root.option_add("*Text.undo",True)
     except tk.TclError:pass

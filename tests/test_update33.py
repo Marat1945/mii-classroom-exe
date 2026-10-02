@@ -36,7 +36,7 @@ class Update33Tests(unittest.TestCase):
         self.assertIsNone(source_date_for_stream(enriched[0],"9-Б ІУ"))
 
     def test_local_status_is_not_claimed_published_before_sync(self):
-        self.assertIn("статус не перевірено",
+        self.assertIn("Створено в Google\" if item",
                       Path(__file__).parents[1].joinpath(
                           "classroom_assistant/gui.py").read_text("utf8"))
         self.assertNotIn('status=("Чернетка Google" if item',

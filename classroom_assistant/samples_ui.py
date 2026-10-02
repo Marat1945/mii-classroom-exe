@@ -176,37 +176,8 @@ def show_samples(parent):
 
 
 # ---------- «Мої дані» ----------
-SKIP_DIRS = {".git", ".github", "classroom_assistant", "tests", "__pycache__", "build", "dist",
-             "venv", ".venv", ".pytest_cache"}
-SECRET_NAMES = {"google_credentials.json", "credentials.json", "token.json"}
-
-
-def is_secret(path: Path) -> bool:
-    name = path.name.casefold()
-    return name in SECRET_NAMES or "token" in name or name.endswith((".pem", ".key", ".env"))
-
-
-def data_files(root: Path = ROOT):
-    """Усі робочі дані програми (КТП, розклад, Word, вкладення), без паролів і токенів."""
-    for item in sorted(root.iterdir()):
-        if item.name in SKIP_DIRS or item.name.startswith("."):
-            continue
-        if item.is_dir():
-            for path in sorted(item.rglob("*")):
-                if path.is_file() and "__pycache__" not in path.parts and not is_secret(path):
-                    yield path
-        elif item.is_file() and item.suffix.casefold() in (".json", ".docx", ".txt", ".md") \
-                and not is_secret(item):
-            yield item
-
-
-def export_all_data(destination, root: Path = ROOT) -> int:
-    count = 0
-    with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in data_files(root):
-            archive.write(path, path.relative_to(root).as_posix())
-            count += 1
-    return count
+from .data_tools import (blank_config, data_files, export_all_data,  # noqa: E402,F401
+                         is_secret, reset_to_blank, restore_from_zip)
 
 
 def open_folder(path: Path):
@@ -252,5 +223,64 @@ def show_data_folder(parent):
             messagebox.showerror("Мої дані", str(ex), parent=win)
     ttk.Button(bar, text="📂 Відкрити папку з даними", command=lambda: open_folder(ROOT)).pack(side="left")
     ttk.Button(bar, text="⬇ Зберегти копію всіх даних (ZIP)…", command=export).pack(side="left", padx=8)
+
+    def default_name(prefix):
+        from datetime import datetime
+        return f"{prefix} {datetime.now():%Y-%m-%d %H-%M}.zip"
+
+    def after_change(message):
+        reload = getattr(parent, "reload_data", None)
+        if reload:
+            reload()
+        messagebox.showinfo("Мої дані", message, parent=win)
+
+    def blank_start():
+        if not messagebox.askyesno(
+                "Почати з порожньої програми",
+                "Програма стане ПОРОЖНЬОЮ: без розкладу, календарних планів, класів, готових Word "
+                "і вкладень. Підключення до Google збережеться.\n\n"
+                "СПЕРШУ ви збережете повну копію всіх даних у ZIP — з неї можна відновитися кнопкою "
+                "«Відновити з копії». Продовжити?", parent=win):
+            return
+        target = filedialog.asksaveasfilename(
+            parent=win, title="Куди зберегти повну копію ПЕРЕД очищенням", defaultextension=".zip",
+            initialfile=default_name("Копія даних до очищення"), filetypes=[("ZIP-архів", "*.zip")])
+        if not target:
+            messagebox.showinfo("Мої дані", "Без копії нічого не очищено.", parent=win)
+            return
+        try:
+            count = reset_to_blank(target)
+        except Exception as ex:
+            messagebox.showerror("Мої дані", f"Не вдалося: {ex}\nДані не змінено, якщо копію не створено.",
+                                 parent=win)
+            return
+        after_change(f"Готово. Збережено файлів у копії: {count}.\nПрограма порожня: завантажте "
+                     "розклад (редактор → «Розклад») і КТП (перетягніть на клас).")
+
+    def restore():
+        source = filedialog.askopenfilename(
+            parent=win, title="Оберіть копію даних (ZIP)", filetypes=[("ZIP-архів", "*.zip")])
+        if not source:
+            return
+        if not messagebox.askyesno(
+                "Відновити з копії",
+                "Поточні дані будуть замінені даними з копії. Перед цим програма сама збереже "
+                "поточний стан у ZIP-файл. Продовжити?", parent=win):
+            return
+        safety = filedialog.asksaveasfilename(
+            parent=win, title="Куди зберегти ПОТОЧНИЙ стан перед відновленням",
+            defaultextension=".zip", initialfile=default_name("Стан перед відновленням"),
+            filetypes=[("ZIP-архів", "*.zip")])
+        if not safety:
+            return
+        try:
+            count = restore_from_zip(source, safety)
+        except Exception as ex:
+            messagebox.showerror("Мої дані", str(ex), parent=win)
+            return
+        after_change(f"Відновлено файлів: {count}.")
+
+    ttk.Button(bar, text="🧹 Почати з порожньої програми…", command=blank_start).pack(side="left", padx=8)
+    ttk.Button(bar, text="♻ Відновити з копії…", command=restore).pack(side="left")
     ttk.Button(win, text="Закрити", command=win.destroy).pack(pady=10)
     return win

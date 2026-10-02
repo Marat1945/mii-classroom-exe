@@ -53,7 +53,7 @@ def weekday_ua(value):
 class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.5")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.6")
         self.geometry("1250x770")
         self.minsize(1060,630)
         maximize_work_window(self)
@@ -117,6 +117,10 @@ class MainApp(WindowBase):
         table_frame.rowconfigure(0,weight=1);table_frame.columnconfigure(0,weight=1)
         self.grid.bind("<<TreeviewSelect>>",lambda _:self.select())
         self.grid.bind("<Button-3>",self._open_lesson_menu)
+        # Enter на виділеному рядку = «Створити ЧЕРНЕТКУ в Classroom» (з підтвердженням).
+        self.grid.bind("<Return>",self._enter_creates_draft)
+        self.grid.bind("<KP_Enter>",self._enter_creates_draft)
+        self.background_menu=self._open_day_menu
         self.grid.bind("<Control-c>",lambda e:self.copy_selected_lessons_as_text())
         self.grid.bind("<Delete>",lambda e:self.remove_selected_local_materials())
         self.grid.bind("<ButtonPress-1>",self._column_drag_start,add="+")
@@ -231,11 +235,11 @@ class MainApp(WindowBase):
         for k,row in enumerate(self.rows):
             item=self.state.get("drafts",{}).get(row.unique_key)
             doc=self.state.get("files",{}).get(row.unique_key,{})
-            status=("Створено в Google (статус не перевірено)" if item else
+            status=("Створено в Google" if item else
                     ("Готовий Word" if doc.get("validated") else
                      ("Word потребує перевірки" if doc.get("complete") else
                       ("Word заготовка" if doc else
-                       ("Без Word (можна надсилати текст/файл)" if row.status=="готово" else row.status)))))
+                       ("Без Word" if row.status=="готово" else row.status)))))
             adjusted=self.effective_lesson(row)
             if row.unique_key in self.state.get("lesson_models",{}):
                 status="Зразок із паралелі · "+status
@@ -300,6 +304,7 @@ class MainApp(WindowBase):
             templ=self.state.get("parallel_templates",{}).get(signature_key(lesson,self.cfg))
             description=render_template(templ,lesson) if templ is not None else html_classroom_text(lesson,asynchronous=True,video=True)
         self.desc.insert("1.0",description)
+        self.desc.yview_moveto(0)
         self.refresh_attachment_previews()
         f=self.state.get("files",{}).get(lesson.unique_key,{})
         status=f"Обрано: {lesson.stream}, урок КТП №{lesson.lesson_number}. Джерело: {lesson.source_file}"
@@ -765,9 +770,46 @@ class MainApp(WindowBase):
              "Кнопку «Підтвердити Word» натискати не треба. "
              "До Google файли ще не надіслано.")
 
+    def _enter_creates_draft(self,_event=None):
+        if self.selected():self.draft()
+        return "break"
+
+    def _open_day_menu(self,event):
+        """Меню для порожнього місця таблиці, шапки й фону вікна: дії над усім днем."""
+        menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label="Попередній день",command=lambda:self.shift(-1))
+        menu.add_command(label="Наступний день",command=lambda:self.shift(1))
+        menu.add_command(label="Сьогодні",
+                         command=lambda:(self.datevar.set(date.today().strftime("%d.%m.%Y")),self.update_day()))
+        menu.add_separator()
+        menu.add_command(label="Лекції ГПТ на весь день…",command=self.chatgpt_batch)
+        menu.add_command(label="Створити чернетки для всього дня…",command=self.batch_drafts)
+        menu.add_separator()
+        menu.add_command(label="Оновити стан із Classroom",
+                         command=lambda:self.sync_classroom(interactive=False,manual=True))
+        menu.add_command(label="Мій Classroom — перегляд",command=self.view_classroom)
+        menu.add_command(label="Редактор КТП, розкладу і навчального року…",command=self.edit_academic_year)
+        menu.add_separator()
+        menu.add_command(label="Зразки документів…",command=self.samples_dialog)
+        menu.add_command(label="Мої дані…",command=self.data_dialog)
+        menu.add_command(label="Початкове налаштування…",command=self.setup_dialog)
+        menu.add_command(label="Довідка",command=self.show_help)
+        try:menu.tk_popup(event.x_root,event.y_root)
+        finally:menu.grab_release()
+        return "break"
+
+    def reload_data(self):
+        """Після очищення чи відновлення: перечитати розклад, КТП і стан з диска."""
+        self.cfg=read_json("Налаштування.json")
+        self.state=read_state()
+        self.remote_classroom_entries={}
+        self.update_day()
+        self.after(400,lambda:self.sync_classroom(interactive=False))
+
     def _open_lesson_menu(self,event):
         item=self.grid.identify_row(event.y)
-        if not item:return
+        if not item:
+            return self._open_day_menu(event)
         if item not in self.grid.selection():
             self.grid.selection_set(item)
         self.grid.focus(item)
