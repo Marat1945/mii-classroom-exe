@@ -8,7 +8,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 from pathlib import Path
 from .editor_core import (deep_copy_data, guess_columns, extract_lessons,
     docx_table_rows, csv_rows, persist, validate_working, tidy,
-    import_source_dates, source_date_for_stream, parse_source_dates)
+    import_source_dates, source_date_for_stream, parse_source_dates, import_notes)
 from .engine import ROOT, save_state, build_calendar
 from .window_ui import maximize_work_window
 try:
@@ -141,7 +141,7 @@ class ImportPreview(tk.Toplevel):
         ttk.Label(outer,text="Зверніть увагу: розділи без номера уроку не імпортуються. Після імпорту можна змінити будь-який пункт.").pack(anchor="w")
         table=ttk.Frame(outer);table.pack(fill="both",expand=True,pady=6)
         self.tree=ttk.Treeview(table,columns=("num","dates","topic","hw"),show="headings")
-        for col,text,width in (("num","№",55),("dates","Дати за класами з файлу",300),
+        for col,text,width in (("num","№",120),("dates","Дати за класами з файлу",300),
                                ("topic","Тема",530),("hw","Д/з",350)):
             self.tree.heading(col,text=text);self.tree.column(col,width=width,anchor="w")
         sb=ttk.Scrollbar(table,command=self.tree.yview)
@@ -173,14 +173,20 @@ class ImportPreview(tk.Toplevel):
             dates=row.get("source_dates",{})
             preview=", ".join(f"{key}: {value[8:10]}.{value[5:7]}.{value[:4]}"
                                for key,value in dates.items())
+            label=str(row["index"])
+            original=row.get("source_number") or ""
+            if original and original.rstrip(".)")!=label:
+                label+=f" (у файлі {original})"
             self.tree.insert("","end",iid=str(row["index"]),
-                             values=(row["index"],preview,row["topic"],row["homework"]))
+                             values=(label,preview,row["topic"],row["homework"]))
         empties=sum(not r["homework"] for r in self.parsed)
         with_dates=sum(bool(x.get("source_dates")) for x in self.parsed)
         classes=sorted({klass for row in self.parsed for klass in
                         row.get("source_dates",{}) if klass!="*"})
+        notes=import_notes(self.parsed)
         self.status.config(text=f"Уроків: {len(self.parsed)}. Із датами: {with_dates}. "
-           f"Класи: {', '.join(classes) or 'загальна дата'}. Без Д/з: {empties}.")
+           f"Класи: {', '.join(classes) or 'загальна дата'}. Без Д/з: {empties}."
+           +(" ПЕРЕВІРТЕ: "+"; ".join(notes)+"." if notes else ""))
 
     def copy_preview_rows(self):
         choice=self.tree.selection()
@@ -533,7 +539,9 @@ class SchoolEditor(tk.Toplevel):
         if current not in streams:
             self.ktp_dates_stream.set(streams[0] if streams else "")
         active=self.ktp_dates_stream.get()
-        dates={x.lesson_number:display_ui_date(x.day)
+        # Обидві дати в ISO: раніше ISO порівнювалося з «ДД.ММ.РРРР» і
+        # попередження про розбіжність з'являлося для КОЖНОГО датованого уроку.
+        dates={x.lesson_number:x.day
                for x in build_calendar(self.cfg,self.plans)
                if x.stream==active and x.plan_id==self.current_plan}
         for item in self.lessons.get_children():self.lessons.delete(item)
@@ -545,8 +553,8 @@ class SchoolEditor(tk.Toplevel):
             # Imported class-specific dates are shown first; if absent use schedule.
             shown=source or calculated
             self.lessons.insert("","end",iid=str(i),
-                     values=(i+1,display_ui_date(shown) if source else
-                             (shown or ""),row["topic"],row.get("homework","")))
+                     values=(i+1,display_ui_date(shown) if shown else "",
+                             row["topic"],row.get("homework","")))
         extra=" ⚠ ПЕРЕВІРТЕ КТП НОВОГО РОКУ" if doc.get("needs_review") else ""
         self.plan_name.config(text=f"{friendly_plan_id(self.current_plan)} • {doc.get('filename','План без джерела')[:90]}{extra}")
         self.plan_count.config(text=f"{len(entries)} уроків. "

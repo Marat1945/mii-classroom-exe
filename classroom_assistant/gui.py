@@ -50,7 +50,7 @@ def weekday_ua(value):
 class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.3")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.4")
         self.geometry("1250x770")
         self.minsize(1060,630)
         maximize_work_window(self)
@@ -121,8 +121,8 @@ class MainApp(WindowBase):
         actions=ttk.Frame(outer);actions.pack(fill="x",pady=9)
         for title,callback in [
             ("Word: заготовка",lambda:self.make_word(False)),
-            ("Word: повна AI-лекція",lambda:self.make_word(True)),
-            ("ВСІ Word за день (AI)",self.batch_ai),
+            ("Word: лекція через ChatGPT",self.chatgpt_word),
+            ("ВСІ Word за день (ChatGPT)",self.chatgpt_batch),
             ("Вибрати готовий Word",self.choose_docx),
             ("Бібліотека Word",self.library_dialog),
             ("Папка Word",self.open_folder),
@@ -410,6 +410,76 @@ class MainApp(WindowBase):
                 "Перед створенням чернеток відкрийте Word і перевірте вміст.")
         self.worker(task,done)
 
+    # ----- Лекції через власний ChatGPT учителя (безкоштовно, без API) -----
+    def chatgpt_word(self):
+        lesson=self.selected()
+        if not lesson:return
+        if lesson.status!="готово":
+            messagebox.showerror("КТП","Теми в КТП завершилися або план не перевірено.");return
+        current=self.state.get("files",{}).get(lesson.unique_key,{})
+        replace=False
+        if current.get("complete") and Path(current.get("path","")).is_file():
+            if not messagebox.askyesno("Word уже є",
+                    "Для цього уроку вже є готовий Word.\n\n"
+                    "Підготувати НОВУ лекцію через ChatGPT і замінити нею поточний Word "
+                    "для цього уроку та сумісної паралелі? Уроки з чернеткою Google не змінюються."):
+                return
+            replace=True
+        else:
+            reusable=find_for_lesson(lesson,self.cfg)
+            if reusable is not None and messagebox.askyesno("Готова лекція є",
+                    "У бібліотеці вже є відповідна лекція.\n\nВикористати її замість нової?"):
+                attached=attach_document(reusable,self._parallel(lesson),self.state)
+                save_state(self.state);self.update_day()
+                messagebox.showinfo("Повторне використання",f"Прив'язано уроків: {len(attached)}.")
+                return
+            if not self._parallel_prompt(lesson,"Підготувати ОДНУ лекцію через ваш ChatGPT (безкоштовно)?"):
+                return
+        from .chatgpt_ui import open_chatgpt_dialog
+        open_chatgpt_dialog(self,[lesson],batch=False,replace_existing=replace)
+
+    def chatgpt_batch(self):
+        lessons=[i for i in self.rows if i.status=="готово"]
+        if not lessons:
+            messagebox.showinfo("Розклад","На цю дату немає уроків із перевіреними КТП.");return
+        pending=[];seen=set();reused=0
+        files=self.state.get("files",{})
+        for lesson in lessons:
+            key=(signature_key(lesson,self.cfg),lesson.lesson_number,
+                 lesson.topic.casefold().strip())
+            # Заготовка не є лекцією: для неї теж готуємо повну лекцію.
+            if files.get(lesson.unique_key,{}).get("complete") or key in seen:
+                continue
+            seen.add(key)
+            existing=find_for_lesson(lesson,self.cfg)
+            if existing is not None:
+                reused+=len(attach_document(existing,self._parallel(lesson),self.state))
+                continue
+            pending.append(lesson)
+        if reused:
+            save_state(self.state);self.update_day()
+        if not pending:
+            messagebox.showinfo("Лекції за день",
+                "Усі уроки цього дня вже мають Word"
+                +(f" (з бібліотеки прив'язано: {reused})." if reused else "."))
+            return
+        names="\n".join(f"• {x.period}-й урок — {x.stream}: {x.topic[:70]}" for x in pending)
+        if not messagebox.askyesno("Лекції за день через ChatGPT",
+              (f"З бібліотеки прив'язано готових лекцій: {reused}.\n\n" if reused else "")
+              +f"Нові лекції потрібні для {len(pending)} уроків:\n{names}\n\n"
+              "Програма по черзі покаже запит для кожного. Продовжити?"):
+            return
+        from .chatgpt_ui import open_chatgpt_dialog
+        open_chatgpt_dialog(self,pending,batch=True)
+
+    def save_chatgpt_lecture(self,lesson,material,replace_existing=False):
+        """Word із відповіді ChatGPT → бібліотека → сумісна паралель. Google не змінюється."""
+        destination=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
+        path=create_word(lesson,destination,material)
+        attached=self._attach_from_master(path,lesson,"ChatGPT",
+                                          replace_existing=replace_existing)
+        return path,attached
+
     def choose_docx(self):
         lesson=self.selected()
         if not lesson:return
@@ -680,6 +750,7 @@ class MainApp(WindowBase):
         menu.add_command(label="Взяти майбутній урок із паралелі…",
                          command=lambda:self.borrow_lesson("future"))
         menu.add_separator()
+        menu.add_command(label="Лекція через мій ChatGPT…",command=self.chatgpt_word)
         menu.add_command(label="Вибрати готовий Word…",command=self.choose_docx)
         menu.add_command(label="Додати файли до Classroom…",command=self.choose_attachments)
         menu.add_command(label="Відкрити папку Word",command=self.open_folder)
@@ -970,22 +1041,23 @@ class MainApp(WindowBase):
         import shutil
         from tkinter import simpledialog
         dlg=tk.Toplevel(self)
-        dlg.title("Перший запуск • Google та AI")
+        dlg.title("Перший запуск • Google, ChatGPT та AI")
         maximize_work_window(dlg)
         dlg.transient(self)
         text=(
-            "РОЗКЛАД І КТП вже працюють локально, навіть без налаштувань.\\n\\n"
+            "РОЗКЛАД І КТП вже працюють локально, навіть без налаштувань.\n\n"
             "GOOGLE CLASSROOM: потрібен одноразовий дозвіл Google (OAuth). "
             "Спочатку у власному Google Cloud проєкті створіть OAuth Client ID типу "
             "Desktop app і увімкніть Classroom API та Drive API. Завантажений JSON "
             "імпортуйте кнопкою нижче; далі натисніть «Підключити Google». "
             "Сервісний JSON із Google Cloud містить ідентифікатор програми, "
-            "а НЕ пароль вашого акаунта. Нікому не пересилайте токен доступу.\\n\\n"
-            "AI-ЛЕКЦІЇ: для їх генерації потрібен ваш власний OpenAI API-ключ "
+            "а НЕ пароль вашого акаунта. Нікому не пересилайте токен доступу.\n\n"
+            "ЛЕКЦІЇ БЕЗКОШТОВНО — ЧЕРЕЗ ВАШ ChatGPT: кнопка «Word: лекція через ChatGPT». "
+            "Програма готує запит за КТП, ви вставляєте його у свій ChatGPT і копіюєте "
+            "відповідь — Word створюється автоматично. Ключі й паролі не потрібні.\n\n"
+            "ПЛАТНИЙ АВТОМАТИЧНИЙ ВАРІАНТ (за бажанням): власний OpenAI API-ключ "
             "(оплата API окрема від підписки ChatGPT). Ключ зберігається "
-            "в захищеному сховищі облікових даних Windows. Без ключа можна "
-            "переглядати календар, отримувати тексти Classroom та прикріплювати "
-            "готові Word вручну.\\n\\n"
+            "в захищеному сховищі облікових даних Windows.\n\n"
             "БЕЗПЕКА: програма ніколи сама не опублікує матеріал; у Classroom "
             "створює тільки ЧЕРНЕТКИ і тільки після вашого підтвердження."
         )
@@ -1019,7 +1091,7 @@ class MainApp(WindowBase):
             api_key_dialog(dlg)
 
         ttk.Button(buttons,text="Імпортувати Google OAuth JSON",command=import_credentials).pack(side="left",padx=5)
-        ttk.Button(buttons,text="Зберегти AI-ключ",command=save_key).pack(side="left",padx=5)
+        ttk.Button(buttons,text="Зберегти AI-ключ (платний режим)",command=save_key).pack(side="left",padx=5)
         ttk.Button(buttons,text="Закрити",command=dlg.destroy).pack(side="right",padx=5)
 
     def get_courses(self):

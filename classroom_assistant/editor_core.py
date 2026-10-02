@@ -17,8 +17,15 @@ from typing import Any
 from .engine import ROOT, DATA, read_json, check_configuration
 
 NUMBER = re.compile(r"^\s*(\d{1,4})[\.\)]?\s*$")
+# Подвійний урок однією темою: «46-47», «16 -17», «16–17.».
+NUMBER_RANGE = re.compile(r"^\s*(\d{1,4})\s*[-–—]\s*(\d{1,4})[\.\)]?\s*$")
 HEADER_TOPIC = ("тема", "зміст уроку", "зміст навчального", "зміст (тема)", "навчальний матеріал")
 HEADER_HW = ("д/з", "дз", "домашн", "примітк")
+# Справжня графа Д/з має перевагу над «Примітками» (КТП 10 ГО має обидві).
+HEADER_HW_PRIMARY = ("д/з", "домашн", "дз")
+HEADER_HW_FALLBACK = ("примітк",)
+HEADER_ROW_TOPICS = ("тема", "тема уроку", "зміст навчального матеріалу",
+                     "зміст уроку", "зміст (тема)", "навчальний матеріал")
 HEADER_NUMBER = ("№", "номер")
 TERM = re.compile(r"\s+")
 
@@ -37,7 +44,9 @@ def guess_columns(headers: list[str]) -> tuple[int, int, int]:
     def locate(terms, default):
         return next((i for i, s in enumerate(lower) if any(w in s for w in terms)), default)
     topic = locate(HEADER_TOPIC, 1 if len(lower)>2 else 0)
-    homework = locate(HEADER_HW, len(lower)-1)
+    homework = locate(HEADER_HW_PRIMARY, None)
+    if homework is None:
+        homework = locate(HEADER_HW_FALLBACK, len(lower)-1)
     number = locate(HEADER_NUMBER, 0)
     if topic == homework and len(lower)>1:
         homework=len(lower)-1
@@ -74,13 +83,76 @@ def docx_table_rows(path: str | Path) -> list[list[str]]:
         raise ValueError("Підтримуються DOCX, DOC (за наявності Microsoft Word) та CSV.")
     from docx import Document
     document=Document(path)
+    auto=_word_auto_numbers(document)
     rows=[]
     for table in document.tables:
         for row in table.rows:
-            rows.append([tidy(cell.text) for cell in row.cells])
+            values=[]
+            for cell in row.cells:
+                text=tidy(cell.text)
+                if not text and auto:
+                    # Графа «№» з автоматичною нумерацією Word: python-docx
+                    # не бачить цих чисел, хоча вчитель бачить їх у документі.
+                    text=next((str(auto[p._p]) for p in cell.paragraphs
+                               if p._p in auto),"")
+                values.append(text)
+            rows.append(values)
     if not rows:
         raise ValueError("У DOCX не знайдено таблиць. Скопіюйте теми вручну або збережіть план у таблиці Word.")
     return rows
+
+
+def _word_auto_numbers(document) -> dict:
+    """Числа автоматичних нумерованих списків Word (лише десятковий формат).
+
+    Повертає словник «абзац → номер», як його показує Word: лічильник на кожен
+    список (numId) і рівень, початок зі start / startOverride.
+    """
+    try:
+        from docx.oxml.ns import qn
+        numbering=document.part.numbering_part.element
+    except Exception:
+        return {}
+    level_info={}
+    for abstract in numbering.findall(qn("w:abstractNum")):
+        aid=abstract.get(qn("w:abstractNumId"))
+        for level in abstract.findall(qn("w:lvl")):
+            start=level.find(qn("w:start"))
+            fmt=level.find(qn("w:numFmt"))
+            level_info[(aid,level.get(qn("w:ilvl")))]=(
+                int(start.get(qn("w:val"))) if start is not None else 1,
+                fmt.get(qn("w:val")) if fmt is not None else "decimal")
+    abstract_of={}
+    overrides={}
+    for num in numbering.findall(qn("w:num")):
+        nid=num.get(qn("w:numId"))
+        ref=num.find(qn("w:abstractNumId"))
+        abstract_of[nid]=ref.get(qn("w:val")) if ref is not None else None
+        for override in num.findall(qn("w:lvlOverride")):
+            start=override.find(qn("w:startOverride"))
+            if start is not None:
+                overrides[(nid,override.get(qn("w:ilvl")))]=int(start.get(qn("w:val")))
+    counters={}
+    found={}
+    for paragraph in document.element.body.iter(qn("w:p")):
+        props=paragraph.find(qn("w:pPr"))
+        numbering_props=props.find(qn("w:numPr")) if props is not None else None
+        if numbering_props is None:
+            continue
+        nid_el=numbering_props.find(qn("w:numId"))
+        lvl_el=numbering_props.find(qn("w:ilvl"))
+        nid=nid_el.get(qn("w:val")) if nid_el is not None else None
+        ilvl=lvl_el.get(qn("w:val")) if lvl_el is not None else "0"
+        if not nid or nid=="0":
+            continue
+        start,fmt=level_info.get((abstract_of.get(nid),ilvl),(1,"decimal"))
+        key=(nid,ilvl)
+        counters[key]=counters[key]+1 if key in counters else overrides.get(key,start)
+        for other in [k for k in counters if k[0]==nid and int(k[1])>int(ilvl)]:
+            del counters[other]
+        if fmt=="decimal":
+            found[paragraph]=counters[key]
+    return found
 
 
 def csv_rows(path: str | Path) -> list[list[str]]:
@@ -95,32 +167,55 @@ def extract_lessons(rows: list[list[str]], topic_col: int, hw_col: int,
     """Не домислює тем/ДЗ: тільки текст вибраних користувачем колонок.
 
     Рядки розділів та заголовків відкидаються, якщо число уроку відсутнє.
+    Подвійний урок «46-47» і повтор номера з іншою темою НЕ губляться:
+    кожен рядок-урок стає окремим записом, а номер у файлі зберігається
+    в source_number для перевірки. Порядковий index — суцільний 1, 2, 3…
     """
     if topic_col < 0 or hw_col < 0:
         raise ValueError("Номери стовпців повинні бути додатними")
     result=[]
     seen=set()
-    for row in rows:
+    for position,row in enumerate(rows,1):
         cell=lambda col: row[col] if col is not None and col<len(row) else ""
         topic=tidy(cell(topic_col)); hw=tidy(cell(hw_col))
-        if not topic or topic.casefold() in ("тема","тема уроку","зміст навчального матеріалу"):
+        if not topic or topic.casefold() in HEADER_ROW_TOPICS:
+            continue
+        if NUMBER.fullmatch(topic):
+            # Рядок нумерації граф під шапкою: «1. | 2. | 3. | 4.».
             continue
         numbertext=tidy(cell(number_col)) if number_col is not None else ""
-        matched=NUMBER.fullmatch(numbertext)
-        if require_number and not matched:
+        numbered=NUMBER.fullmatch(numbertext) or NUMBER_RANGE.fullmatch(numbertext)
+        if require_number and not numbered:
             continue
-        if matched:
-            index=int(matched.group(1))
-            # Same index sometimes repeated across multiple tables; duplicates should be inspected.
-            if index in seen: continue
-            seen.add(index)
-        else:
-            index=len(result)+1
+        if numbered:
+            # Таблиця, повторена у файлі двічі: однаковий номер І однакова тема.
+            twin=(numbertext.replace(" ",""),topic.casefold())
+            if twin in seen: continue
+            seen.add(twin)
         if len(topic)>4000:
             # Mis-chosen results or explanatory outcome column; always leave review possible
             topic=topic[:4000]
-        result.append({"index":index,"topic":topic,"homework":hw})
+        result.append({"index":len(result)+1,"topic":topic,"homework":hw,
+                       "source_row":position,
+                       "source_number":numbertext if numbered else ""})
     return result
+
+
+def import_notes(lessons: list[dict]) -> list[str]:
+    """Що варто перевірити в попередньому перегляді імпорту."""
+    notes=[]
+    doubles=[x["source_number"] for x in lessons
+             if NUMBER_RANGE.fullmatch(x.get("source_number") or "")]
+    if doubles:
+        notes.append("подвійні уроки однією темою: "+", ".join(doubles)
+                     +" (кожен — один запис; за потреби додайте копію)")
+    numbers=[NUMBER.fullmatch(x.get("source_number") or "") for x in lessons]
+    values=[int(m.group(1)) for m in numbers if m]
+    repeated=sorted({v for v in values if values.count(v)>1})
+    if repeated:
+        notes.append("номер повторюється з іншою темою: "
+                     +", ".join(map(str,repeated))+" (імпортовано всі рядки)")
+    return notes
 
 
 
@@ -133,7 +228,8 @@ DATE_PATTERN=re.compile(
 CLASS_DATE_PATTERN=re.compile(
     r"(?<!\d)(?P<klass>(?:[5-9]|10|11)\s*[-–]\s*[А-ЯІЇЄҐA-Z])"
     r"\s*[:\-–]?\s*(?P<day>0?[1-9]|[12]\d|3[01])[./]"
-    r"(?P<month>0?[1-9]|1[012])(?:[./](?P<year>(?:20)?\d{2}))?",
+    # 1[012] перед 0?[1-9] і (?!\d): інакше «04.12.» читалося як 04.01 (жовтень–грудень → січень).
+    r"(?P<month>1[012]|0?[1-9])(?!\d)(?:[./](?P<year>(?:20)?\d{2}))?",
     re.IGNORECASE
 )
 
@@ -176,13 +272,7 @@ def import_source_dates(rows,lessons,topic_col,number_col,academic_start=2026):
                   if any("тема" in tidy(cell).casefold() or "зміст" in tidy(cell).casefold()
                          for cell in row)),rows[0] if rows else [])
     date_columns=[i for i,x in enumerate(headers) if "дата" in tidy(x).casefold()]
-    by_number={r["index"]:r for r in lessons}
-    for raw in rows:
-        if len(raw)<=max(topic_col,number_col):continue
-        matched=NUMBER.fullmatch(tidy(raw[number_col]))
-        if not matched:continue
-        lesson=by_number.get(int(matched.group(1)))
-        if not lesson or tidy(lesson["topic"])!=tidy(raw[topic_col]):continue
+    def enrich(lesson,raw):
         columns=date_columns or [
             col for col in range(len(raw)) if col not in (topic_col,number_col)
             and any(ch.isdigit() for ch in raw[col])
@@ -193,6 +283,26 @@ def import_source_dates(rows,lessons,topic_col,number_col,academic_start=2026):
             parsed=parse_source_dates(raw[col],academic_start)
             for key,value in parsed.items():found.setdefault(key,value)
         if found:lesson["source_dates"]=found
+    pending=[]
+    for lesson in lessons:
+        # Новий імпорт пам'ятає свій рядок: дата не «з'їжджає» після
+        # подвійного уроку чи повтору номера у файлі.
+        position=lesson.get("source_row")
+        if isinstance(position,int) and 1<=position<=len(rows):
+            raw=rows[position-1]
+            if (len(raw)>max(topic_col,number_col)
+                    and tidy(raw[topic_col])[:4000]==tidy(lesson["topic"])):
+                enrich(lesson,raw);continue
+        pending.append(lesson)
+    by_number={r["index"]:r for r in pending}
+    for raw in rows:
+        if not by_number:break
+        if len(raw)<=max(topic_col,number_col):continue
+        matched=NUMBER.fullmatch(tidy(raw[number_col]))
+        if not matched:continue
+        lesson=by_number.get(int(matched.group(1)))
+        if not lesson or tidy(lesson["topic"])!=tidy(raw[topic_col]):continue
+        enrich(lesson,raw)
     return lessons
 
 
