@@ -105,7 +105,10 @@ class EditorKtpFlowTests(TkCase):
 
     @staticmethod
     def commit(editor):
-        next(w for w in editor.winfo_children() if isinstance(w, editor_ui.ImportPreview)).commit()
+        """Імпорт автоматичний: вікна перегляду немає (лишилось для старих викликів)."""
+        for w in editor.winfo_children():
+            if isinstance(w, editor_ui.ImportPreview):
+                w.commit()
 
     def select(self, editor, course):
         index = next(i for i, e in enumerate(editor.list_entries) if e["course"] == course)
@@ -119,29 +122,27 @@ class EditorKtpFlowTests(TkCase):
         with tempfile.TemporaryDirectory() as folder:
             ktp = make_ktp(Path(folder) / "Календарне_ВІ_9-Б_9-Г_2026-2027.docx",
                            "Календарне планування. Всесвітня історія, 9 клас", ["9-Б", "9-Г"])
-            asked = []
-            def answer(title, text, **kw):
-                asked.append((title, text))
-                return True                                         # «призначити за змістом файлу»
-            with mock.patch.object(editor_ui.messagebox, "askyesnocancel", answer):
+            with mock.patch.object(editor_ui.messagebox, "askyesnocancel",
+                                   side_effect=AssertionError("запитань не має бути")), \
+                    mock.patch.object(editor_ui.messagebox, "askyesno",
+                                      side_effect=AssertionError("запитань не має бути")):
                 editor.import_plan(path=ktp)
-                self.commit(editor)
-        self.assertEqual(asked[0][0], "Перевірте клас")
-        self.assertIn("9-Б ВІ", asked[0][1])
         cmap = editor.cfg["course_map"]
         self.assertEqual(cmap["9-Б ВІ"]["plan"], cmap["9-Г ВІ"]["plan"])               # спільний КТП
         self.assertEqual(len(editor.plans[cmap["9-Б ВІ"]["plan"]]["lessons"]), 5)
         self.assertEqual(editor.plans[cmap["9-Б ІУ"]["plan"]]["lessons"], [])           # ІУ не зачеплено
+        note = editor.history_note.cget("text")
+        self.assertIn("9-Б ВІ, 9-Г ВІ", note)
+        self.assertIn("а не до «9-Б ІУ»", note)
 
-    def test_cancel_changes_nothing(self):
+    def test_import_can_be_undone_with_back(self):
         editor = self.editor(["9-Б ІУ", "9-Б ВІ"])
-        self.select(editor, "9-Б ІУ")
         before = json.dumps([editor.cfg, editor.plans], sort_keys=True)
         with tempfile.TemporaryDirectory() as folder:
             ktp = make_ktp(Path(folder) / "Календарне_ВІ_9-Б.docx", "Всесвітня історія, 9 клас", ["9-Б"])
-            with mock.patch.object(editor_ui.messagebox, "askyesnocancel", return_value=None):
-                editor.import_plan(path=ktp)
-                self.commit(editor)
+            editor.import_plan(path=ktp)
+            self.assertNotEqual(json.dumps([editor.cfg, editor.plans], sort_keys=True), before)
+            editor.undo()
         self.assertEqual(json.dumps([editor.cfg, editor.plans], sort_keys=True), before)
 
     def test_dropped_beside_any_class_the_program_decides_by_content(self):

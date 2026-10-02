@@ -248,7 +248,6 @@ class EditorBehaviourTests(TkCase):
                 return "9-Б ГО"
             with mock.patch.object(editor, "_ask_choice", choose):
                 editor.import_plan(path=ktp)
-                next(w for w in editor.winfo_children() if isinstance(w, editor_ui.ImportPreview)).commit()
         self.assertEqual(asked, [["9-Б ГО", "9-Б Право"]])
         self.assertEqual(len(editor.plans["p2"]["lessons"]), 5)
         self.assertEqual(editor.plans["p1"]["lessons"], [])

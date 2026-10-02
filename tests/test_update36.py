@@ -318,8 +318,6 @@ class BlankProgramTests(TkCase):
             editor.plan_selected()
             self.assertIn("КТП ще не підключено", editor.plan_name.cget("text"))
             editor.import_plan(path=ktp)
-            preview = next(w for w in editor.winfo_children() if isinstance(w, editor_ui.ImportPreview))
-            preview.commit()
             plan = editor.cfg["course_map"]["8-Б ІУ"]["plan"]
             self.assertEqual(len(editor.plans[plan]["lessons"]), 5)
             # паралельні 8-В ІУ (та сама тема й клас) отримали той самий КТП, зайві порожні плани зникли
@@ -355,8 +353,6 @@ class WrongClassGuardTests(TkCase):
                 return title != "Перевірте клас"
             with mock.patch.object(editor_ui.messagebox, "askyesno", refuse):
                 editor.import_plan(path=source)
-                preview = next(w for w in editor.winfo_children() if isinstance(w, editor_ui.ImportPreview))
-                preview.commit()
             self.assertIn("Перевірте клас", asked)
             self.assertEqual(editor.plans["9-Б ІУ"]["lessons"], [])
         finally:

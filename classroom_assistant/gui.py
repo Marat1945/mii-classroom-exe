@@ -840,16 +840,52 @@ class MainApp(WindowBase):
         finally:menu.grab_release()
         return "break"
 
-    def reload_data(self):
-        """Після очищення чи відновлення: перечитати розклад, КТП і стан з диска."""
+    def _reload_from_disk(self):
+        """Перечитати розклад, КТП і стан з диска (після очищення чи відновлення)."""
         self.cfg=read_json("Налаштування.json")
         self.state=read_state()
         self.remote_classroom_entries={}
         self._plans_sig=None
         self.update_day()
+        self.after(400,lambda:self.sync_classroom(interactive=False))
+
+    def reload_data(self):
+        """Просте перечитування з очищенням історії (коли скасувати вже нічого)."""
+        self._reload_from_disk()
         self.history.reset(self._history_snapshot())
         self._history_buttons()
-        self.after(400,lambda:self.sync_classroom(interactive=False))
+
+    def begin_data_operation(self):
+        """Викликати ДО скидання/відновлення: фіксує поточний стан як крок історії."""
+        self._history_record()
+
+    def apply_data_operation(self,label,undo_zip,redo_action):
+        """Після скидання/відновлення з копії: це звичайний крок історії.
+
+        «↶ Назад» розпакує undo_zip (повну копію, збережену ПЕРЕД операцією), «↷ Вперед» повторить операцію.
+        """
+        self._reload_from_disk()
+        snapshot=self._history_snapshot()
+        if not self.history.record(snapshot,label,{"undo_zip":str(undo_zip),"redo":redo_action}):
+            self.history.replace_current(snapshot)
+        self._history_buttons()
+
+    def _undo_data_operation(self,meta):
+        archive=Path(meta["undo_zip"])
+        if not archive.is_file():
+            raise FileNotFoundError(f"Копію не знайдено: {archive}")
+        data_tools.restore_from_zip(archive,data_tools.auto_backup_path("Стан перед скасуванням"))
+        self._reload_from_disk()
+
+    def _redo_data_operation(self,meta):
+        action=meta.get("redo")
+        if action=="reset":
+            data_tools.reset_to_blank(meta["undo_zip"])         # знову: копія -> порожня програма
+        elif isinstance(action,(list,tuple)) and action and action[0]=="restore":
+            data_tools.restore_from_zip(action[1],data_tools.auto_backup_path("Стан перед відновленням"))
+        else:
+            raise ValueError("Невідома операція")
+        self._reload_from_disk()
 
     def _open_lesson_menu(self,event):
         item=self.grid.identify_row(event.y)
@@ -1295,7 +1331,18 @@ class MainApp(WindowBase):
         step=self.history.undo()
         if not step:
             self.foot.config(text="Немає що скасовувати.");return "break"
-        self._restore_snapshot(step[0])
+        meta=self.history.step_meta
+        try:
+            if meta and meta.get("undo_zip"):
+                self._undo_data_operation(meta)          # скидання / відновлення: беремо автоматичну копію
+                self.history.replace_current(self._history_snapshot())
+                self._history_buttons()
+            else:
+                self._restore_snapshot(step[0])
+        except Exception as ex:
+            self.history.redo()                           # вказівник історії — на місце
+            messagebox.showerror("Назад",f"Не вдалося скасувати: {ex}")
+            return "break"
         self.foot.config(text=f"Скасовано: {step[1]}. «Вперед» поверне назад.")
         return "break"
 
@@ -1307,7 +1354,18 @@ class MainApp(WindowBase):
         step=self.history.redo()
         if not step:
             self.foot.config(text="Немає що повертати.");return "break"
-        self._restore_snapshot(step[0])
+        meta=self.history.step_meta
+        try:
+            if meta and meta.get("undo_zip"):
+                self._redo_data_operation(meta)
+                self.history.replace_current(self._history_snapshot())
+                self._history_buttons()
+            else:
+                self._restore_snapshot(step[0])
+        except Exception as ex:
+            self.history.undo()
+            messagebox.showerror("Вперед",f"Не вдалося повторити: {ex}")
+            return "break"
         self.foot.config(text=f"Повернуто: {step[1]}.")
         return "break"
 
@@ -1328,18 +1386,19 @@ class MainApp(WindowBase):
         if not messagebox.askyesno("Скинути ВСЕ?",
                 "Буде видалено розклад, класи, календарні плани, готові Word, вкладення та весь стан програми.\n\n"
                 "Підключення до Google збережеться.\n\n"
-                "ПЕРЕД цим програма сама збереже повну копію всього; кнопка «↩ Відновити останню копію» "
-                "поверне все назад.\n\nСкинути все?",icon="warning",default="no"):
+                "ПЕРЕД цим програма сама збереже повну копію всього. Повернути все назад можна кнопкою "
+                "«↶ Назад» (або «↩ Відновити останню копію»).\n\nСкинути все?",icon="warning",default="no"):
             return
+        self.begin_data_operation()
         path=data_tools.auto_backup_path(data_tools.RESET_PREFIX)
         try:
             data_tools.reset_to_blank(path)
         except Exception as ex:
             messagebox.showerror("Скинути все",f"Не вдалося: {ex}\nЯкщо копію не створено, дані не змінено.")
             return
-        self.reload_data()
+        self.apply_data_operation("Скинуто все",path,"reset")
         messagebox.showinfo("Готово",f"Усе скинуто. Повну копію збережено:\n{path}\n\n"
-                            "Повернути все: кнопка «↩ Відновити останню копію».")
+                            "Повернути все назад: кнопка «↶ Назад» (або «↩ Відновити останню копію»).")
 
     def restore_last_backup(self):
         latest=data_tools.latest_backup()
@@ -1351,14 +1410,15 @@ class MainApp(WindowBase):
         when=datetime.fromtimestamp(latest.stat().st_mtime).strftime("%d.%m.%Y %H:%M")
         if not messagebox.askyesno("Відновити останню копію",
                 f"Відновити дані з копії від {when}?\n{latest.name}\n\n"
-                "Поточний стан перед цим буде збережено в окрему копію.",default="no"):
+                "Поточний стан перед цим буде збережено в окрему копію (кнопка «↶ Назад» поверне його).",default="no"):
             return
+        self.begin_data_operation()
         safety=data_tools.auto_backup_path("Стан перед відновленням")
         try:
             count=data_tools.restore_from_zip(latest,safety)
         except Exception as ex:
             messagebox.showerror("Відновлення",str(ex));return
-        self.reload_data()
+        self.apply_data_operation("Відновлено з копії",safety,("restore",str(latest)))
         messagebox.showinfo("Відновлено",f"Відновлено файлів: {count}.")
 
     def _maybe_offer_blank_start(self):
@@ -1371,10 +1431,12 @@ class MainApp(WindowBase):
                 "а класи підтягуються з Classroom.\n\n"
                 "Зараз у програмі є ваші старі розклад і КТП. Очистити їх?\n\n"
                 "Перед очищенням програма автоматично збереже ПОВНУ копію; кнопка "
-                "«↩ Відновити останню копію» поверне все.",default="no"):
+                "«↶ Назад» (або «↩ Відновити останню копію») поверне все.",default="no"):
+            self.begin_data_operation()
+            path=data_tools.auto_backup_path(data_tools.RESET_PREFIX)
             try:
-                data_tools.reset_to_blank(data_tools.auto_backup_path(data_tools.RESET_PREFIX))
-                self.reload_data()
+                data_tools.reset_to_blank(path)
+                self.apply_data_operation("Скинуто все",path,"reset")
             except Exception as ex:
                 messagebox.showerror("Очищення",str(ex));return
         self.state["blank_offer_37"]=True

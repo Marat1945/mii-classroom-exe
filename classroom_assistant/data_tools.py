@@ -93,6 +93,13 @@ def restore_from_zip(zip_path, safety_zip, root: Path = ROOT) -> int:
         if not planned:
             raise ValueError("У ZIP немає даних для відновлення.")
         export_all_data(safety_zip, root)
+        # Відновлення = стан РІВНО як у копії: папки з даними замінюються, а не доповнюються
+        # (поточний стан щойно збережено в safety_zip). Вхід у Google (токени) не чіпаємо.
+        for name in WIPE_DIRS:
+            shutil.rmtree(root / name, ignore_errors=True)
+        state_file = root / "data" / "Стан.json"
+        if "data/Стан.json" not in names and state_file.exists():
+            state_file.unlink()
         for info, target in planned:
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info) as source, open(target, "wb") as out:

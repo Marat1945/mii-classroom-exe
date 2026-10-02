@@ -16,7 +16,7 @@ from .material_library import stream_subject
 from .datepicker import DateField, pick_date
 from .history import History, describe_change
 from .course_match import assign_streams, best_match, link_streams, norm as match_norm, parse as match_parse
-from . import ktp_detect
+from . import ktp_detect, ktp_import
 try:
     from tkinterdnd2 import DND_FILES
 except ImportError:
@@ -227,10 +227,6 @@ class ImportPreview(tk.Toplevel):
         self.refresh()
         if not self.parsed:
             messagebox.showerror("Імпорт","Не знайдено жодного уроку. Перевірте номери стовпців.",parent=self);return
-        if not messagebox.askyesno("Імпорт КТП",
-                f"Замінити поточний план на {len(self.parsed)} тем із файлу?\n"
-                "Перевірте теми й Д/з. Заміни зберігаються у програмі після кнопки «Зберегти ВСЕ».",
-                parent=self):return
         payload=copy.deepcopy(self.parsed)
         for ix,row in enumerate(payload,1):
             row["index"]=ix
@@ -268,7 +264,6 @@ class SchoolEditor(tk.Toplevel):
         notebook.add(self.tab_streams,text="КЛАСИ / КУРСИ")
         notebook.add(self.tab_year,text="НАВЧАЛЬНИЙ РІК, КАНІКУЛИ")
         self._plans_ui();self._schedule_ui();self._streams_ui();self._year_ui()
-        self._setup_file_drop_targets()
         buttons=ttk.Frame(outer);buttons.pack(fill="x",pady=4)
         ttk.Button(buttons,text="ЗБЕРЕГТИ ВСІ ЗМІНИ (з резервною копією)",command=self.save).pack(side="left")
         self.undo_button=ttk.Button(buttons,text="↶ Назад",command=self.undo,state="disabled")
@@ -284,6 +279,7 @@ class SchoolEditor(tk.Toplevel):
         # Побудова вкладок сама оновлює похідні поля (напр. список курсів):
         # запам'ятати стан ПІСЛЯ цього, щоб «незбережені зміни» означали лише ваші правки.
         self.auto_link()
+        self._setup_file_drop_targets()          # у кінці: щоб drop приймала і нижня смуга кнопок
         self.original_cfg=copy.deepcopy(self.cfg)
         self.original_plans=copy.deepcopy(self.plans)
         self.history=History()
@@ -350,24 +346,41 @@ class SchoolEditor(tk.Toplevel):
         super().destroy()
 
     def _setup_file_drop_targets(self):
-        """Windows drag-and-drop на КТП/розклад/курси з підсвічуванням."""
+        """Перетягування файлів: на клас, на таблиці — і в БУДЬ-ЯКЕ місце вікна (КТП чи розклад — сама)."""
         if not DND_FILES:return
         self._dnd_highlight=None
         self.lessons.tag_configure("drop-target",background="#FFE49A")
         self.slots.tag_configure("drop-target",background="#FFE49A")
         self.streamtree.tag_configure("drop-target",background="#FFE49A")
-        for widget,kind in ((self.planlist,"planlist"),
-                            (self.lessons,"lesson"),
-                            (self.slots,"schedule"),
-                            (self.streamtree,"stream")):
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<DropEnter>>",
-                lambda e,k=kind:self._highlight_ktp_drop(e,k))
-            widget.dnd_bind("<<DropPosition>>",
-                lambda e,k=kind:self._highlight_ktp_drop(e,k))
-            widget.dnd_bind("<<DropLeave>>",self._clear_ktp_drop)
-            widget.dnd_bind("<<Drop>>",
-                lambda e,k=kind:self._drop_ktp_file(e,k))
+        specific=((self.planlist,"planlist"),(self.lessons,"lesson"),(self.slots,"schedule"),
+                  (self.streamtree,"stream"))
+        taken={id(widget) for widget,_ in specific}
+        self.drop_hint=tk.Label(self,bg="#FFE49A",fg="#164F82",font=("Segoe UI",10,"bold"),
+            text="⬇  Відпустіть файли: програма сама визначить, що це (КТП чи розклад) і кому призначити")
+        everything=list(specific)
+        stack=[self]
+        while stack:
+            widget=stack.pop()
+            stack.extend(widget.winfo_children())
+            if id(widget) not in taken and widget is not self.drop_hint:
+                everything.append((widget,"window"))
+        everything.append((self.drop_hint,"window"))
+        for widget,kind in everything:
+            try:
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<DropEnter>>",lambda e,k=kind:self._highlight_ktp_drop(e,k))
+                widget.dnd_bind("<<DropPosition>>",lambda e,k=kind:self._highlight_ktp_drop(e,k))
+                widget.dnd_bind("<<DropLeave>>",self._clear_ktp_drop)
+                widget.dnd_bind("<<Drop>>",lambda e,k=kind:self._drop_ktp_file(e,k))
+            except tk.TclError:pass
+
+    def _show_drop_hint(self):
+        try:self.drop_hint.place(x=0,y=0,relwidth=1,height=28);self.drop_hint.lift()
+        except (AttributeError,tk.TclError):pass
+
+    def _hide_drop_hint(self):
+        try:self.drop_hint.place_forget()
+        except (AttributeError,tk.TclError):pass
 
     def _planlist_item_at(self,y):
         """Рядок списку під вказівником; None, якщо вказівник поза рядками (порожнє місце)."""
@@ -389,9 +402,13 @@ class SchoolEditor(tk.Toplevel):
                     widget.item(index,tags=tuple(tags))
             except tk.TclError:pass
         self._dnd_highlight=None
+        self._hide_drop_hint()
         return "copy"
 
     def _highlight_ktp_drop(self,event,kind):
+        if kind=="window":
+            self._show_drop_hint();return "copy"
+        self._hide_drop_hint()
         widget={"planlist":self.planlist,"lesson":self.lessons,
                 "schedule":self.slots,"stream":self.streamtree}[kind]
         y=widget.winfo_pointery()-widget.winfo_rooty()
@@ -407,10 +424,13 @@ class SchoolEditor(tk.Toplevel):
         return "copy"
 
     def _drop_ktp_file(self,event,kind):
-        widget={"planlist":self.planlist,"lesson":self.lessons,
-                "schedule":self.slots,"stream":self.streamtree}[kind]
-        y=widget.winfo_pointery()-widget.winfo_rooty()
-        item=(self._planlist_item_at(y) if kind=="planlist" else widget.identify_row(y))
+        """Один або кілька файлів, кинутих будь-куди у вікні: імпорт без запитань «Так/Ні»."""
+        item=None
+        if kind!="window":
+            widget={"planlist":self.planlist,"lesson":self.lessons,
+                    "schedule":self.slots,"stream":self.streamtree}[kind]
+            y=widget.winfo_pointery()-widget.winfo_rooty()
+            item=(self._planlist_item_at(y) if kind=="planlist" else widget.identify_row(y))
         self._clear_ktp_drop()
         try:
             files=[Path(x) for x in self.tk.splitlist(event.data)]
@@ -418,45 +438,29 @@ class SchoolEditor(tk.Toplevel):
             return "copy"
         files=[f for f in files if f.is_file()]
         if not files:return "copy"
-        if len(files)>1:
-            messagebox.showwarning("Імпорт",
-                "Перетягуйте один документ за раз, щоб точно обрати КТП або розклад.",
-                parent=self)
-            return "copy"
-        path=files[0]
-        if kind in ("planlist","lesson","stream"):
-            if path.suffix.lower() not in (".docx",".doc",".csv"):
-                messagebox.showinfo("КТП","Для КТП потрібен DOCX, DOC або CSV.",
-                                    parent=self)
-                return "copy"
-            if kind=="planlist":
-                if item is not None and 0<=item<len(self.list_entries):
-                    self.planlist.selection_clear(0,"end")
-                    self.planlist.selection_set(item)
-                    self.plan_selected()
-                else:                       # повз клас: програма сама визначить клас за змістом файлу
-                    self.planlist.selection_clear(0,"end")
-                    self.current_entry=None;self.current_plan=None
-            elif kind=="lesson" and item:
-                self.lessons.selection_set(item)
-                self.lesson_selected()
-            elif kind=="stream" and item:
-                values=widget.item(item,"values")
-                name=values[0] if values else None
-                course=self.cfg["course_map"].get(name,{}).get("course_title")
-                ix=next((i for i,e in enumerate(self.list_entries)
-                         if e.get("course")==course),None)
-                if ix is not None:
-                    self.notebook.select(self.tab_plans)
-                    self.planlist.selection_clear(0,"end")
-                    self.planlist.selection_set(ix)
-                    self.plan_selected()
-            self.import_plan(path=path)
-        elif kind=="schedule":
-            if path.suffix.lower() not in (".docx",".doc",".xlsx",".csv"):
-                messagebox.showinfo("Розклад","Для імпорту розкладу потрібен Word, Excel або CSV.",
-                                    parent=self)
-            else:self.import_schedule(path=path)
+        entry=None
+        if kind=="planlist":
+            if item is not None and 0<=item<len(self.list_entries):
+                self.planlist.selection_clear(0,"end")
+                self.planlist.selection_set(item)
+                self.plan_selected()
+                entry=self.current_entry
+            else:                       # повз клас: програма сама визначить клас за змістом файлу
+                self.planlist.selection_clear(0,"end")
+                self.current_entry=None;self.current_plan=None
+        elif kind=="lesson":
+            entry=self.current_entry
+        elif kind=="stream" and item:
+            name=widget.item(item,"values")[0]
+            course=self.cfg["course_map"].get(name,{}).get("course_title")
+            index=next((i for i,e in enumerate(self.list_entries) if e.get("course")==course),None)
+            if index is not None:
+                self.notebook.select(self.tab_plans)
+                self.planlist.selection_clear(0,"end")
+                self.planlist.selection_set(index)
+                self.plan_selected()
+                entry=self.current_entry
+        self.import_files(files,entry)
         return "copy"
 
     def open_backup(self):
@@ -493,9 +497,9 @@ class SchoolEditor(tk.Toplevel):
         ttk.Label(left,text="Класи з вашого Classroom",
                   font=("Segoe UI",10,"bold")).pack(anchor="w")
         ttk.Label(left,foreground="#365777",wraplength=250,justify="left",
-                  text=("Порядок як у Classroom. Перетягніть файл КТП на клас — "
-                        "клас підсвітиться." if DND_FILES else
-                        "Порядок як у Classroom. Для КТП натисніть «Імпортувати».")
+                  text=("Порядок як у Classroom. Перетягніть у будь-яке місце вікна ВСІ файли КТП "
+                        "(і розклад) разом: програма сама визначить, кому вони. Або на клас." if DND_FILES else
+                        "Порядок як у Classroom. Для КТП натисніть «Імпортувати файли…».")
                   ).pack(anchor="w",pady=(0,4))
         self.planlist=tk.Listbox(left,width=31,exportselection=False,height=11,
                                  activestyle="none",selectbackground="#2E7BC4",
@@ -507,7 +511,7 @@ class SchoolEditor(tk.Toplevel):
         self.planlist.bind("<Control-c>",lambda e:self.copy_plan_data())
         ttk.Button(left,text="+ Додати курс",command=lambda:self.edit_course(True)).pack(fill="x",pady=(4,2))
         ttk.Button(left,text="✎ Редагувати курс",command=lambda:self.edit_course(False)).pack(fill="x",pady=2)
-        ttk.Button(left,text="Імпортувати DOCX / DOC / CSV",command=self.import_plan).pack(fill="x",pady=2)
+        ttk.Button(left,text="Імпортувати файли…",command=self.import_plan).pack(fill="x",pady=2)
         ttk.Button(left,text="Позначити КТП перевіреним",command=self.approve_plan).pack(fill="x",pady=2)
         ttk.Button(left,text="🗑 Видалити КТП",command=self.delete_ktp).pack(fill="x",pady=2)
         right=ttk.Frame(tab,padding=6);right.pack(side="left",fill="both",expand=True)
@@ -721,7 +725,7 @@ class SchoolEditor(tk.Toplevel):
         name=entry.get("course") or "клас"
         self.plan_name.config(text=f"{name}: КТП ще не підключено")
         self.plan_count.config(text=("Перетягніть сюди файл КТП (DOCX, DOC, CSV) — програма "
-            "створить для цього класу план. Або натисніть «Імпортувати DOCX / DOC / CSV»."))
+            "створить для цього класу план. Або натисніть «Імпортувати файли…»."))
 
     def focus_lesson(self,stream,number):
         """Відкрити КТП клітинки з головного вікна: клас → план → рядок уроку."""
@@ -1058,26 +1062,124 @@ class SchoolEditor(tk.Toplevel):
         return result["value"]
 
     def import_plan(self,path=None):
-        entry=self.current_entry or {}
+        """Кнопка «Імпортувати…»: можна вибрати ОДИН чи КІЛЬКА файлів — решту програма робить сама."""
         if path is None:
-            path=filedialog.askopenfilename(parent=self,title="Новий календарний план",
-                    filetypes=[("Календарні плани Word/CSV","*.docx *.doc *.csv"),("Word DOCX","*.docx"),("Word DOC (через Word)","*.doc"),("CSV","*.csv")])
-        if not path:return
-        if Path(path).suffix.lower() not in (".docx",".doc",".csv"):
-            messagebox.showerror("Формат","Підтримуються DOCX, DOC (через Word) та CSV.",parent=self);return
-        selected=list(entry.get("streams") or []) if entry.get("kind")=="course" else []
-        def accept(entries,filename):
-            self.lesson_row=None
-            detection=ktp_detect.detect(filename,ktp_detect.header_text(path),entries)
-            chosen=list(selected);created=None
-            if entry.get("kind")=="course" and not chosen:
-                created=self._ensure_stream_for_course(entry["course"],detection)    # курс без предметів
-                chosen=[created]
-            targets=self._resolve_ktp_targets(detection,entry,chosen)
-            if targets:self._store_ktp(targets,entries,filename)
-            elif created:self._remove_streams([created],ask=False)                   # скасували — прибрати заготовку
+            chosen=filedialog.askopenfilenames(parent=self,title="Календарні плани та розклад",
+                    filetypes=[("Календарні плани й розклад","*.docx *.doc *.csv *.xlsx"),
+                               ("Word DOCX","*.docx"),("Word DOC (через Word)","*.doc"),("CSV","*.csv")])
+            paths=[Path(x) for x in chosen]
+        else:
+            paths=[Path(path)]
+        if paths:self.import_files(paths,self.current_entry)
+
+    def import_files(self,files,entry=None):
+        """Файли (КТП, розклад) → призначення за змістом. Жодних запитань; підсумок і «Назад» для скасування."""
+        files=[Path(f) for f in files]
+        bulk=len(files)>1
+        if bulk:entry=None
+        kinds={f:ktp_import.classify_file(f) for f in files}
+        results=[]
+        for f in files:
+            if kinds[f]=="schedule":
+                ok=bool(self.import_schedule(path=f,quiet=True))
+                results.append({"name":f.name,"ok":ok,"note":"розклад завантажено" if ok else "розклад не завантажено"})
+        for f in files:
+            if kinds[f]=="ktp":results.append(self._auto_import_ktp(f,entry,bulk))
+            elif kinds[f]=="image":
+                results.append({"name":f.name,"ok":False,
+                    "note":"зображення програма прочитати не може: завантажте Word- або Excel-файл"})
+            elif kinds[f]=="unsupported":
+                results.append({"name":f.name,"ok":False,"note":"формат не підтримується (потрібні DOCX, DOC, CSV, XLSX)"})
+        if not bulk and results and results[0].get("needs_preview"):
+            self._manual_preview(files[0],entry)            # автоматично не вийшло: показуємо таблицю
+            return
+        self._report_import(results,bulk)
+
+    def _report_import(self,results,bulk):
+        done=[r for r in results if r["ok"]];failed=[r for r in results if not r["ok"]]
+        self._refresh_planlist()
+        lines=[]
+        for r in done:
+            line="✓ "+r["name"]
+            if r.get("targets"):line+=" → "+", ".join(r["targets"])
+            if r.get("lessons"):line+=f" ({r['lessons']} уроків)"
+            if r.get("note"):line+=" — "+r["note"]
+            lines.append(line)
+        lines+=[f"✗ {r['name']} — {r['note']}" for r in failed]
+        if not bulk and results and results[0]["ok"]:
+            self.history_note.config(text=lines[0],foreground="#2E6B30")      # без вікон
+            return
+        text=f"Імпортовано: {len(done)} з {len(results)}.\n\n"+"\n".join(lines[:30])
+        if len(lines)>30:text+=f"\n… ще {len(lines)-30}"
+        text+="\n\nУсе можна скасувати кнопкою «↶ Назад», доки редактор відкритий."
+        (messagebox.showwarning if failed else messagebox.showinfo)("Імпорт файлів",text,parent=self)
+
+    def _auto_import_ktp(self,path,entry,bulk):
+        name=path.name
+        try:
+            lessons=ktp_import.load_ktp(path,int(self.cfg["year_start"][:4]))
+        except Exception as ex:
+            return {"name":name,"ok":False,"note":f"не вдалося прочитати: {ex}","needs_preview":True}
+        if not lessons:
+            return {"name":name,"ok":False,"note":"не знайдено жодного уроку: перевірте таблицю","needs_preview":True}
+        return self._assign_ktp(lessons,name,path,entry,bulk)
+
+    def _manual_preview(self,path,entry):
+        """Запасний шлях: якщо стовпці не розпізналися, вчитель вказує їх у попередньому перегляді."""
+        def accept(lessons,filename):
+            result=self._assign_ktp(lessons,filename,path,entry,False)
+            self._report_import([result],False)
         try:ImportPreview(self,path,accept)
         except Exception as ex:messagebox.showerror("КТП не розпізнано",str(ex),parent=self)
+
+    def _assign_ktp(self,lessons,name,path,entry,bulk):
+        detection=ktp_detect.detect(name,ktp_detect.header_text(path),lessons)
+        selected=list(entry.get("streams") or []) if entry and entry.get("kind")=="course" else []
+        created=None
+        if entry and entry.get("kind")=="course" and not selected and not bulk:
+            created=self._ensure_stream_for_course(entry["course"],detection)      # курс без предметів
+            selected=[created]
+        targets,note=self._decide_targets(detection,entry,selected,bulk)
+        if created and (not targets or created not in targets):
+            self._remove_streams([created],ask=False)                       # тимчасовий потік не знадобився
+        if not targets:
+            return {"name":name,"ok":False,"note":note or "не вдалося визначити, для якого класу цей КТП"}
+        replaced=[s for s in targets
+                  if self.plans.get(self.cfg["course_map"][s]["plan"],{}).get("lessons")]
+        self._store_ktp(targets,lessons,name)
+        if replaced:note=(note+"; " if note else "")+"замінено наявний КТП: "+", ".join(replaced)
+        return {"name":name,"ok":True,"targets":targets,"lessons":len(lessons),"note":note}
+
+    def _decide_targets(self,detection,entry,selected,bulk):
+        """(класи, примітка). Спершу зміст файлу; питання лише коли інакше не обійтись (один файл)."""
+        every=sorted(self.cfg["course_map"])
+        if not every:
+            return None,"у програмі ще немає класів: завантажте розклад або додайте курс"
+        found=ktp_detect.targets(detection,every) if detection.grade else []
+        if ktp_detect.level_conflict(found) and not detection.level:found=[]    # профіль чи стандарт — не вгадуємо
+        course=(entry or {}).get("course")
+        if found:
+            note=""
+            if selected and not (set(selected)&set(found)):
+                note=f"призначено за змістом файлу, а не до «{course}»"
+            return found,note
+        if selected:
+            if detection.classes:
+                mine={self._class_of(s) for s in selected}-{None}
+                if mine and not (mine & detection.classes):
+                    shown=", ".join(sorted(c.upper() for c in detection.classes))
+                    if bulk:return None,f"у файлі інші класи ({shown}), а відповідного класу в програмі немає"
+                    if not messagebox.askyesno("Перевірте клас",
+                            f"У файлі є дати для класів: {shown}.\nА ви додаєте цей КТП до «{course}».\n\n"
+                            "Можливо, ви перетягнули файл не на той клас. Усе одно додати?",parent=self):
+                        return None,"не додано: файл для інших класів"
+            chosen=self._pick_streams(selected,[],detection,course,bulk)
+            return (chosen,"") if chosen else (None,"у курсі кілька предметів: вкажіть, для якого цей КТП")
+        if bulk:
+            return None,"не вдалося визначити клас і предмет: киньте цей файл на потрібний клас"
+        if not (self.cfg["course_map"]):return None,"немає класів"
+        chosen=self._ask_choice("Для якого класу цей КТП?","Оберіть клас і предмет, для яких цей файл:",every)
+        return ([chosen],"") if chosen else (None,"не вибрано клас")
 
     def _ensure_stream_for_course(self,course,detection):
         """Курс Classroom є, а предметів у програмі ще немає: створює потік за змістом файлу."""
@@ -1101,59 +1203,15 @@ class SchoolEditor(tk.Toplevel):
         parsed=match_parse(stream)
         return f"{parsed.grade}-{parsed.letter}" if parsed and parsed.letter else None
 
-    def _resolve_ktp_targets(self,detection,entry,selected):
-        """Кому призначити КТП: за змістом файлу (клас, предмет, рівень, літери в датах) і вибором вчителя."""
-        every=sorted(self.cfg["course_map"])
-        if not every:
-            messagebox.showinfo("КТП","Спершу завантажте розклад (вкладка «Розклад») або додайте курс: "
-                "тоді буде куди призначити КТП.",parent=self);return None
-        found=ktp_detect.targets(detection,every) if detection.grade else []
-        if ktp_detect.level_conflict(found) and not detection.level:found=[]   # профіль чи стандарт — обере вчитель
-        course=entry.get("course")
-        if not selected:
-            if found and messagebox.askyesno("Призначити КТП за змістом файлу",
-                    f"Файл схожий на КТП: {detection.describe()}.\n\nПризначити його:\n"
-                    +"\n".join("• "+s for s in found)
-                    +"\n\nТак — призначити; Ні — вибрати клас вручну.",parent=self):
-                return found
-            chosen=self._ask_choice("Для якого класу цей КТП?","Оберіть клас і предмет, для яких цей файл:",every)
-            return [chosen] if chosen else None
-        common=[s for s in selected if s in found]
-        if found and not common:
-            answer=messagebox.askyesnocancel("Перевірте клас",
-                f"Схоже, цей файл — КТП для: {', '.join(found)}\n({detection.describe()}).\n"
-                f"А ви додаєте його до «{course}».\n\n"
-                "Так — призначити за змістом файлу.\nНі — все одно додати до вибраного класу.\n"
-                "Скасувати — нічого не робити.",parent=self)
-            if answer is None:return None
-            if answer:return found
-        elif not found and detection.classes:
-            mine={self._class_of(s) for s in selected}-{None}
-            if mine and not (mine & detection.classes):
-                if not messagebox.askyesno("Перевірте клас",
-                        f"У файлі є дати для класів: {', '.join(sorted(c.upper() for c in detection.classes))}.\n"
-                        f"А ви додаєте цей КТП до «{course}».\n\n"
-                        "Можливо, ви перетягнули файл не на той клас. Усе одно додати?",parent=self):
-                    return None
-        chosen=self._pick_streams(selected,common,detection,course)
-        if not chosen:return None
-        base=self.cfg["course_map"][chosen[0]]["plan"]
-        free=[s for s in found if s not in chosen and
-              (self.cfg["course_map"][s]["plan"]==base or
-               not self.plans.get(self.cfg["course_map"][s]["plan"],{}).get("lessons"))]
-        if free and messagebox.askyesno("Той самий КТП для паралелі?",
-                "Цей файл підходить і цим класам, у яких ще немає свого КТП:\n"
-                +"\n".join("• "+s for s in free)
-                +"\n\nПризначити їм цей самий КТП? (Дати для кожного класу беруться з файлу.)",parent=self):
-            chosen=chosen+free
-        return chosen
 
-    def _pick_streams(self,selected,common,detection,course):
+
+    def _pick_streams(self,selected,common,detection,course,bulk=False):
         plans={self.cfg["course_map"][s]["plan"] for s in selected}
         if len(plans)<=1:return list(selected)
         if len(common)==1:return common
         by_subject=[s for s in selected if ktp_detect.targets(detection,[s])]
         if len(by_subject)==1:return by_subject
+        if bulk:return None
         chosen=self._ask_choice("Для якого предмета цей КТП?",
             f"У курсі «{course}» кілька предметів. Оберіть, для якого з них цей файл:",sorted(selected))
         return [chosen] if chosen else None
@@ -1191,25 +1249,24 @@ class SchoolEditor(tk.Toplevel):
         self._refresh_planlist()
 
     def _offer_new_streams(self,unknown,rows,schedule,found):
-        """Повертає (залишились_невідомі, розклад, номери_уроків); (None,…) — скасовано."""
+        """Повертає (залишились_невідомі, розклад, номери_уроків); (None,…) — скасовано.
+
+        У порожній програмі нові класи створюються самі; питання лише коли вже є свої класи.
+        """
         from .schedule_io import decode_schedule
         candidates=[x for x in unknown if re.match(r"^\d{1,2}\b",x.strip())]
         if not candidates:return unknown,schedule,found
         empty=not self.cfg["course_map"]
-        names="\n".join("• "+x for x in candidates[:25])
-        extra="" if empty else "\n\n«Так» — створити нові потоки; «Ні» — зіставити з наявними вручну."
-        if not messagebox.askyesno("Нові класи з розкладу",
-                f"У файлі є класи/предмети, яких ще немає в програмі ({len(candidates)}):\n{names}\n\n"
-                "Створити їх автоматично? Для кожного буде створено потік і порожній КТП: заповніть його, "
-                "перетягнувши файл КТП на клас у «Календарних планах»."+extra,parent=self):
-            return (None,schedule,found) if empty else (unknown,schedule,found)
+        if not empty:
+            names="\n".join("• "+x for x in candidates[:25])
+            if not messagebox.askyesno("Нові класи з розкладу",
+                    f"У файлі є класи/предмети, яких ще немає в програмі ({len(candidates)}):\n{names}\n\n"
+                    "Створити їх автоматично? Для кожного буде створено потік і порожній КТП."
+                    "\n\n«Так» — створити нові потоки; «Ні» — зіставити з наявними вручну.",parent=self):
+                return unknown,schedule,found
         self._create_streams(candidates)
         schedule,rest,found=decode_schedule(rows,self.cfg)
         return rest,schedule,found
-
-
-
-
 
     def _schedule_ui(self):
         tab=self.tab_schedule
@@ -1712,21 +1769,21 @@ class SchoolEditor(tk.Toplevel):
             if self.cfg["days"].get(str(day)):self.cfg["days"][str(day)].pop()
         self.refresh_time_fields();self.refresh_slots()
 
-    def import_schedule(self,path=None):
+    def import_schedule(self,path=None,quiet=False):
         from .schedule_io import table_rows,decode_schedule
         if path is None:
             path=filedialog.askopenfilename(parent=self,title="Імпортувати розклад",
                  filetypes=[("Таблиці","*.docx *.doc *.csv *.xlsx"),
                             ("Word","*.docx *.doc"),("Excel","*.xlsx"),("CSV","*.csv")])
-        if not path:return
+        if not path:return False
         try:
             rows_cache=table_rows(path)
             schedule,unknown,found=decode_schedule(rows_cache,self.cfg)
         except Exception as e:
-            messagebox.showerror("Не вдалося імпортувати",str(e),parent=self);return
+            messagebox.showerror("Не вдалося імпортувати",str(e),parent=self);return False
         if unknown:
             unknown,schedule,found=self._offer_new_streams(unknown,rows_cache,schedule,found)
-            if unknown is None:return
+            if unknown is None:return False
         if unknown:
             from .schedule_io import _normalize
             dlg=tk.Toplevel(self);dlg.title("Зіставте назви предметів у файлі");fit_work_window(dlg,"normal")
@@ -1758,11 +1815,12 @@ class SchoolEditor(tk.Toplevel):
                 chosen["ok"]=True;dlg.destroy()
             ttk.Button(dlg,text="Зберегти відповідності",command=apply).pack(side="bottom",pady=9)
             self.wait_window(dlg)
-            if not chosen["ok"]:return
+            if not chosen["ok"]:return False
             schedule,unknown,found=decode_schedule(rows_cache,self.cfg)
             if unknown:
-                messagebox.showerror("Зіставлення","Залишилися невідомі назви:\n"+"\n".join(unknown),parent=self);return
-        if messagebox.askyesno("Перегляд імпорту",
+                messagebox.showerror("Зіставлення","Залишилися невідомі назви:\n"+"\n".join(unknown),parent=self);return False
+        has_schedule=any(pair[0] or pair[1] for pairs in self.cfg["days"].values() for pair in pairs)
+        if quiet or not has_schedule or messagebox.askyesno("Перегляд імпорту",
             f"Прочитано уроків із номерами: {', '.join(map(str,found))}.\n"
             "ЗАМІНИТИ всі 5 днів розкладу на нову таблицю?\n"
             "Зміни поки будуть лише в редакторі до натискання «ЗБЕРЕГТИ ВСІ ЗМІНИ».",parent=self):
@@ -1775,15 +1833,18 @@ class SchoolEditor(tk.Toplevel):
             if found and sorted((h["start"],h["end"]) for h in found)!=sorted(
                     (h["start"],h["end"]) for h in self.cfg.get("holidays",[])):
                 names=", ".join(f"{display_ui_date(h['start'])[:5]}–{display_ui_date(h['end'])[:5]}" for h in found)
-                if messagebox.askyesno("Канікули з файлу",
+                if (not self.cfg.get("holidays")) or messagebox.askyesno("Канікули з файлу",
                         f"У першому рядку файлу вказано канікули: {names}.\n\n"
                         "Записати їх у програму (замінивши поточні канікули)?",parent=self):
                     self.cfg["holidays"]=found;self.refresh_holidays()
             self.refresh_slots()
             self.auto_link()
             self._refresh_planlist()
-            messagebox.showinfo("Імпорт","Розклад у редакторі оновлено. Перегляньте всі дні.\n"
-                "Не забудьте натиснути «ЗБЕРЕГТИ ВСІ ЗМІНИ».",parent=self)
+            if not quiet:
+                messagebox.showinfo("Імпорт","Розклад у редакторі оновлено. Перегляньте всі дні.\n"
+                    "Не забудьте натиснути «ЗБЕРЕГТИ ВСІ ЗМІНИ».",parent=self)
+            return True
+        return False
 
     def _workload_config(self):
         self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]

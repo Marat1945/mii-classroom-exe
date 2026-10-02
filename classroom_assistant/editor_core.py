@@ -399,7 +399,8 @@ def atomic_json_write(filename: str, data: dict):
 
 
 def persist(config: dict, plans: dict, state: dict, label="редагування")->Path:
-    errors=validate_working(config,plans)
+    # Клас без КТП — не помилка: вчитель може завантажити КТП пізніше.
+    errors=[e for e in validate_working(config,plans) if not e.startswith("Порожній КТП")]
     if errors:
         raise ValueError("Не можна зберегти:\n"+" \n".join(errors[:25]))
     previous,old_plans=deep_copy_data()

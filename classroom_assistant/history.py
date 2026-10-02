@@ -13,20 +13,22 @@ class History:
         self.limit = limit
         self.items = []
         self.index = -1
+        self.step_meta = None          # додаткові відомості про крок, який щойно скасовано / повернуто
 
-    def reset(self, snapshot, label="Початковий стан"):
-        self.items = [(snapshot, label)]
+    def reset(self, snapshot, label="Початковий стан", meta=None):
+        self.items = [(snapshot, label, meta)]
         self.index = 0
+        self.step_meta = None
 
     @property
     def current(self):
         return self.items[self.index][0] if 0 <= self.index < len(self.items) else None
 
-    def record(self, snapshot, label="Зміна"):
+    def record(self, snapshot, label="Зміна", meta=None):
         if self.current == snapshot:
             return False
         del self.items[self.index + 1:]
-        self.items.append((snapshot, label))
+        self.items.append((snapshot, label, meta))
         self.index = len(self.items) - 1
         if len(self.items) > self.limit:
             self.items.pop(0)
@@ -35,7 +37,7 @@ class History:
 
     def replace_current(self, snapshot):
         if self.index >= 0:
-            self.items[self.index] = (snapshot, self.items[self.index][1])
+            self.items[self.index] = (snapshot, self.items[self.index][1], self.items[self.index][2])
 
     def can_undo(self):
         return self.index > 0
@@ -48,6 +50,7 @@ class History:
         if not self.can_undo():
             return None
         label = self.items[self.index][1]
+        self.step_meta = self.items[self.index][2]
         self.index -= 1
         return self.items[self.index][0], label
 
@@ -55,7 +58,8 @@ class History:
         if not self.can_redo():
             return None
         self.index += 1
-        return self.items[self.index]
+        snapshot, label, self.step_meta = self.items[self.index]
+        return snapshot, label
 
     def undo_label(self):
         return self.items[self.index][1] if self.can_undo() else ""

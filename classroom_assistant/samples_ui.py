@@ -313,10 +313,17 @@ def show_data_folder(parent):
         from datetime import datetime
         return f"{prefix} {datetime.now():%Y-%m-%d %H-%M}.zip"
 
-    def after_change(message):
-        reload = getattr(parent, "reload_data", None)
-        if reload:
-            reload()
+    def begin():
+        prepare = getattr(parent, "begin_data_operation", None)
+        if prepare:
+            prepare()                         # стан ДО операції стає кроком історії
+
+    def after_change(message, label=None, undo_zip=None, redo=None):
+        apply = getattr(parent, "apply_data_operation", None)
+        if apply and undo_zip:
+            apply(label, undo_zip, redo)      # «↶ Назад» у головному вікні поверне все з копії
+        elif getattr(parent, "reload_data", None):
+            parent.reload_data()
         messagebox.showinfo("Мої дані", message, parent=win)
 
     def blank_start():
@@ -333,6 +340,7 @@ def show_data_folder(parent):
         if not target:
             messagebox.showinfo("Мої дані", "Без копії нічого не очищено.", parent=win)
             return
+        begin()
         try:
             count = reset_to_blank(target)
         except Exception as ex:
@@ -340,7 +348,9 @@ def show_data_folder(parent):
                                  parent=win)
             return
         after_change(f"Готово. Збережено файлів у копії: {count}.\nПрограма порожня: завантажте "
-                     "розклад (редактор → «Розклад») і КТП (перетягніть на клас).")
+                     "розклад (редактор → «Розклад») і КТП (перетягніть на клас).\n"
+                     "Повернути все назад: кнопка «↶ Назад» у головному вікні.",
+                     "Скинуто все", target, "reset")
 
     def restore():
         source = filedialog.askopenfilename(
@@ -358,12 +368,13 @@ def show_data_folder(parent):
             filetypes=[("ZIP-архів", "*.zip")])
         if not safety:
             return
+        begin()
         try:
             count = restore_from_zip(source, safety)
         except Exception as ex:
             messagebox.showerror("Мої дані", str(ex), parent=win)
             return
-        after_change(f"Відновлено файлів: {count}.")
+        after_change(f"Відновлено файлів: {count}.", "Відновлено з копії", safety, ("restore", source))
 
     ttk.Button(bar, text="🧹 Почати з порожньої програми…", command=blank_start).pack(side="left", padx=8)
     ttk.Button(bar, text="♻ Відновити з копії…", command=restore).pack(side="left")

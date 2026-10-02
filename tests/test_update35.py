@@ -272,6 +272,7 @@ class EditorClassListTests(unittest.TestCase):
         self.assertEqual([e["course"] for e in editor.list_entries[:2]], ["10-Б ГО", "8-Б ІУ"])
 
     def test_dropped_file_is_imported_without_asking_for_it_again(self):
+        """Файл 8 ІУ, кинутий на порожній курс «5-Б», автоматично йде до класів 8 ІУ (без вікон і запитань)."""
         self.root.google_courses = [{"name": "5-Б", "id": "1"}]
         editor = self.make()
         editor.planlist.selection_clear(0, "end")
@@ -281,14 +282,15 @@ class EditorClassListTests(unittest.TestCase):
             path = Path(folder) / "ktp.docx"
             samples_ui.build_sample_ktp(path)
             with mock.patch.object(editor_ui.filedialog, "askopenfilename",
-                                   side_effect=AssertionError("вікно вибору файлу не має відкриватись")):
+                                   side_effect=AssertionError("вікно вибору файлу не має відкриватись")), \
+                    mock.patch.object(editor_ui.messagebox, "askyesno",
+                                      side_effect=AssertionError("запитань не має бути")):
                 editor.import_plan(path=path)
-            preview = next(w for w in editor.winfo_children() if isinstance(w, editor_ui.ImportPreview))
-            preview.commit()
-        self.assertIn("5-Б", editor.cfg["course_map"])
-        plan = editor.cfg["course_map"]["5-Б"]["plan"]
-        self.assertEqual(len(editor.plans[plan]["lessons"]), 5)
-        self.assertEqual(editor.list_entries[0]["plan"], plan)
+        self.assertNotIn("5-Б", editor.cfg["course_map"])                 # зайвий тимчасовий потік прибрано
+        for stream in ("8-Б ІУ", "8-В ІУ", "8-Г ІУ"):
+            plan = editor.cfg["course_map"][stream]["plan"]
+            self.assertEqual(len(editor.plans[plan]["lessons"]), 5, stream)
+
 
     def test_close_asks_and_can_save(self):
         editor = self.make()
