@@ -64,7 +64,7 @@ def weekday_ua(value):
 class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.7")
+        self.title("Помічник учителя Classroom")
         self.geometry("1250x770")
         self.minsize(1060,630)
         maximize_work_window(self)
@@ -395,7 +395,7 @@ class MainApp(WindowBase):
         lesson=self.selected()
         if not lesson:return
         if lesson.status!="готово":
-            messagebox.showerror("КТП","Теми в КТП завершилися або план не перевірено.");return
+            messagebox.showerror("КТП",self._not_ready_text(lesson));return
         if with_ai:
             reusable=find_for_lesson(lesson,self.cfg)
             if reusable is not None:
@@ -479,7 +479,7 @@ class MainApp(WindowBase):
         lesson=self.selected()
         if not lesson:return
         if lesson.status!="готово":
-            messagebox.showerror("КТП","Теми в КТП завершилися або план не перевірено.");return
+            messagebox.showerror("КТП",self._not_ready_text(lesson));return
         current=self.state.get("files",{}).get(lesson.unique_key,{})
         replace=False
         if current.get("complete") and Path(current.get("path","")).is_file():
@@ -1384,6 +1384,13 @@ class MainApp(WindowBase):
         self._plans_digest_now()
         return self._plans_store.get(self._plans_digest,"").strip() not in ("","{}")
 
+    @staticmethod
+    def _not_ready_text(lesson):
+        if lesson.status=="КТП не завантажено":
+            return ("Для цього класу ще не завантажено КТП. Відкрийте «Редактор КТП…» і перетягніть "
+                    "файл КТП на клас: програма сама визначить, кому він підходить.")
+        return "Теми в КТП завершилися або план не перевірено."
+
     def connect_google(self):
         """Перший раз — покрокова інструкція з підключення; далі — лише оновлення з Classroom."""
         from . import google_client
@@ -1416,11 +1423,25 @@ class MainApp(WindowBase):
                 self.after(0,lambda:self._sync_failed(text,interactive))
         threading.Thread(target=run,daemon=True).start()
 
+    def _link_courses_automatically(self,courses):
+        """Курс у програмі = точна назва курсу в Classroom (підбір за змістом: клас + предмет)."""
+        from .course_match import link_streams
+        ids={c["name"]:str(c["id"]) for c in courses}
+        changed=link_streams(self.cfg.get("course_map",{}),list(ids))
+        if not changed:return
+        self.cfg["classroom_course_titles"]=list(dict.fromkeys(
+            info["course_title"] for info in self.cfg["course_map"].values()))
+        for _old,new in changed.values():
+            self.state["course_ids"][new]=ids[new]
+        try:write_json("Налаштування.json",self.cfg)
+        except OSError:pass
+
     def _sync_done(self,result,interactive):
         self._sync_running=False
         self.google_courses=result["courses"]
         self.state["course_ids"]=result["mapped"]
         self.state["classroom_order"]=[c["name"] for c in result["courses"]]
+        self._link_courses_automatically(result["courses"])
         self.remote_classroom_entries.update(result["entries"])
         try:save_state(self.state)
         except Exception:pass

@@ -139,3 +139,20 @@ def describe(name) -> str:
         return str(name)
     subjects = ", ".join(SUBJECT_NAMES[s] for s in sorted(parsed.subjects)) or "?"
     return f"{parsed.grade} клас, {subjects}"
+
+
+def link_streams(course_map: dict, course_names) -> dict:
+    """Підставляє точні назви курсів Classroom у потоки, чия назва збігається лише за змістом.
+
+    Повертає {потік: (стара_назва, нова_назва)}. Неоднозначне не змінюється.
+    """
+    names = list(course_names)
+    changed = {}
+    for stream, info in course_map.items():
+        title = info.get("course_title", "")
+        exact = next((n for n in names if norm(n) == norm(title)), None) if title else None
+        hit = exact or best_match(title or stream, names) or best_match(stream, names)
+        if hit and hit != title:
+            info["course_title"] = hit
+            changed[stream] = (title, hit)
+    return changed

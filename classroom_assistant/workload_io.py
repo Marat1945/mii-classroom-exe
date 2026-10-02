@@ -20,9 +20,33 @@ DEFAULT_MEAL = "ХАРЧУВАННЯ У ЇДАЛЬНІ"
 
 
 # ---------- спільна логіка ----------
+RANGE = re.compile(r"(\d{2})\.(\d{2})\s*[-–]\s*(\d{2})\.(\d{2})")
+
+
+def holidays_from_title(text, year_start) -> list:
+    """«канікули 26.10-01.11, 24.12-10.01» → [{'start': ISO, 'end': ISO}], роки за навчальним роком."""
+    low = str(text).casefold()
+    at = low.find("канікул")
+    if at < 0:
+        return []
+    base = int(str(year_start)[:4])
+    result = []
+    for d1, m1, d2, m2 in RANGE.findall(str(text)[at:]):
+        try:
+            def iso(day, month):
+                y = base if int(month) >= 8 else base + 1
+                return date(y, int(month), int(day)).isoformat()
+            start, end = iso(d1, m1), iso(d2, m2)
+        except ValueError:
+            continue
+        if end >= start:
+            result.append({"start": start, "end": end})
+    return result
+
+
 def holidays_text(config) -> str:
     parts = []
-    for item in config.get("holidays", []):
+    for item in sorted(config.get("holidays", []), key=lambda h: str(h.get("start", ""))):
         try:
             start = date.fromisoformat(item["start"])
             end = date.fromisoformat(item["end"])
@@ -77,10 +101,10 @@ def row_count(config) -> int:
     return len(config.get("period_times", []))
 
 
-def parse_workload_title(rows) -> dict:
+def parse_workload_title(rows, year_start=None) -> dict:
     """З імпортованої таблиці дістає прізвище та код із першого рядка-заголовка."""
     for row in rows[:3]:
-        text = " ".join(str(c) for c in row if str(c).strip())
+        text = " ".join(dict.fromkeys(str(c) for c in row if str(c).strip()))     # об'єднані клітинки
         if not text.upper().lstrip().startswith("НАВАНТАЖЕННЯ"):
             continue
         info = {}
@@ -90,6 +114,10 @@ def parse_workload_title(rows) -> dict:
         tail = re.search(r"//\s*([0-9A-Za-zА-Яа-я\-]{3,})\s*$", text)
         if tail and not re.search(r"\d{2}\.\d{2}", tail.group(1)):
             info["workload_code"] = tail.group(1)
+        if year_start:
+            found = holidays_from_title(text, year_start)
+            if found:
+                info["holidays"] = found
         return info
     return {}
 

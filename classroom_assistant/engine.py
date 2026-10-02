@@ -26,7 +26,9 @@ def ensure_default_data(data_dir):
 
 
 if getattr(sys, "frozen", False):
-    ROOT = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "PomichnykUchyteliaClassroom"
+    from .locations import documents_dir, legacy_dir, resolve_root
+    # Дані — у «Документах\\Помічник учителя Classroom» (старі з AppData переносяться копією).
+    ROOT, DATA_WHERE = resolve_root(documents_dir(), legacy_dir())
     DATA = ROOT / "data"
     DATA.mkdir(parents=True, exist_ok=True)
     # Користувацькі налаштування та OAuth-токени НІКОЛИ не перезаписуються.
@@ -111,7 +113,11 @@ def build_calendar(config=None, plans=None, until=None):
                 row_index=counts[stream]-1
                 plan=plans[plan_id]
                 entries=plan["lessons"]
-                if plan.get("needs_review",False):
+                if not entries:
+                    topic="КТП ще не завантажено: перетягніть файл КТП на цей клас у редакторі"
+                    hw=""
+                    status="КТП не завантажено"
+                elif plan.get("needs_review",False):
                     topic="КТП попереднього року: потрібне підтвердження або імпорт нового плану"
                     hw=""
                     status="потрібен КТП нового року"

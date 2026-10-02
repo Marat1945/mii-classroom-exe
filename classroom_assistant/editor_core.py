@@ -157,9 +157,23 @@ def _word_auto_numbers(document) -> dict:
 
 def csv_rows(path: str | Path) -> list[list[str]]:
     text=Path(path).read_text(encoding="utf-8-sig")
-    try: dialect=csv.Sniffer().sniff(text[:2048],delimiters=";,\t")
-    except csv.Error: dialect=csv.excel
-    return [[tidy(c) for c in row] for row in csv.reader(io.StringIO(text),dialect)]
+    # Excel в українській локалі зберігає CSV з «;». Обираємо роздільник, що дає найбільше
+    # однакових колонок у більшості рядків (назва з комами в першому рядку не збиває).
+    best=(1,0,None)
+    for delimiter in (";","\t",","):
+        widths={}
+        rows=[r for r in csv.reader(io.StringIO(text),delimiter=delimiter) if r]
+        for row in rows:widths[len(row)]=widths.get(len(row),0)+1
+        if not widths:continue
+        width,count=max(widths.items(),key=lambda kv:(kv[1],kv[0]))
+        if width>1 and count>=max(2,len(rows)//3) and (width,count)>best[:2]:
+            best=(width,count,delimiter)
+    if best[2]:dialect=csv.excel;delimiter=best[2]
+    else:
+        try:
+            dialect=csv.Sniffer().sniff(text[:2048],delimiters=";,\t");delimiter=dialect.delimiter
+        except csv.Error:dialect=csv.excel;delimiter=","
+    return [[tidy(c) for c in row] for row in csv.reader(io.StringIO(text),delimiter=delimiter)]
 
 
 def extract_lessons(rows: list[list[str]], topic_col: int, hw_col: int,

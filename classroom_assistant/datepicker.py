@@ -30,14 +30,17 @@ def shift_month(year, month, delta):
 
 
 class CalendarDialog(tk.Toplevel):
-    def __init__(self, parent, initial=None, title="Оберіть дату", weekday=None):
+    def __init__(self, parent, initial=None, title="Оберіть дату", weekday=None, default=None,
+                 min_date=None):
         super().__init__(parent)
         self.title(title)
         self.resizable(False, False)
         self.result = None
         self.weekday = weekday
-        self.selected = initial or date.today()
-        self.year, self.month = self.selected.year, self.selected.month
+        self.min_date = min_date
+        self.selected = initial
+        start = initial or default or date.today()      # календар відкривається на потрібному місяці
+        self.year, self.month = start.year, start.month
         self.escape_closes = True
         top = parent.winfo_toplevel()
         try:
@@ -84,6 +87,8 @@ class CalendarDialog(tk.Toplevel):
     def choose(self, picked):
         if self.weekday is not None and picked.weekday() != self.weekday:
             return
+        if self.min_date is not None and picked < self.min_date:
+            return
         self.result = picked
         self.destroy()
 
@@ -98,7 +103,8 @@ class CalendarDialog(tk.Toplevel):
         for row, week in enumerate(month_grid(self.year, self.month), 1):
             for column, day in enumerate(week):
                 inside = day.month == self.month
-                allowed = self.weekday is None or day.weekday() == self.weekday
+                allowed = ((self.weekday is None or day.weekday() == self.weekday)
+                           and (self.min_date is None or day >= self.min_date))
                 is_selected = day == self.selected
                 button = tk.Button(
                     self.body, text=str(day.day), width=4, relief="flat", bd=0, pady=4,
@@ -112,9 +118,10 @@ class CalendarDialog(tk.Toplevel):
                 button.bind("<Double-Button-1>", lambda _e, d=day: self.choose(d))
 
 
-def pick_date(parent, text="", weekday=None, title="Оберіть дату"):
-    """Повертає «ДД.ММ.РРРР» або None, якщо вчитель закрив календар."""
-    dialog = CalendarDialog(parent, parse_ui_date(text), title=title, weekday=weekday)
+def pick_date(parent, text="", weekday=None, title="Оберіть дату", default=None, min_date=None):
+    """Повертає «ДД.ММ.РРРР» або None. default — місяць, на якому відкрити, якщо поле порожнє."""
+    dialog = CalendarDialog(parent, parse_ui_date(text), title=title, weekday=weekday,
+                            default=default, min_date=min_date)
     parent.wait_window(dialog)
     return dialog.result.strftime("%d.%m.%Y") if dialog.result else None
 
@@ -122,14 +129,18 @@ def pick_date(parent, text="", weekday=None, title="Оберіть дату"):
 class DateField(ttk.Frame):
     """Поле дати + кнопка календаря."""
 
-    def __init__(self, master, variable, weekday=None, width=14, title="Оберіть дату"):
+    def __init__(self, master, variable, weekday=None, width=14, title="Оберіть дату",
+                 default=None, min_date=None):
         super().__init__(master)
         self.variable, self.weekday, self.title_text = variable, weekday, title
+        self.default, self.min_date = default, min_date          # функції, що повертають дату або None
         self.entry = ttk.Entry(self, textvariable=variable, width=width)
         self.entry.pack(side="left")
         ttk.Button(self, text="📅", width=3, command=self.open).pack(side="left", padx=(3, 0))
 
     def open(self):
-        chosen = pick_date(self.entry, self.variable.get(), self.weekday, self.title_text)
+        chosen = pick_date(self.entry, self.variable.get(), self.weekday, self.title_text,
+                           default=self.default() if self.default else None,
+                           min_date=self.min_date() if self.min_date else None)
         if chosen:
             self.variable.set(chosen)

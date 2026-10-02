@@ -78,6 +78,41 @@ def build_sample_workload(path):
     return export_workload_docx(sample_workload_config(), path)
 
 
+def build_sample_workload_jpeg(path):
+    from .workload_io import export_workload_jpeg
+    return export_workload_jpeg(sample_workload_config(), path)
+
+
+def build_sample_workload_csv(path):
+    """Той самий зразок у CSV (Excel) — програма читає і такий файл."""
+    import csv
+    import tempfile
+    from .schedule_io import table_rows
+    with tempfile.TemporaryDirectory() as folder:
+        docx = build_sample_workload(Path(folder) / "n.docx")
+        rows = table_rows(docx)
+    with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle, delimiter=";")
+        for row in rows:
+            writer.writerow([row[0]] if len(set(row)) == 1 else row)
+    return Path(path)
+
+
+SCHEDULE_DESCRIPTION = """ЯК ВИГЛЯДАЄ РОЗКЛАД (навантаження), який розуміє програма:
+
+• Аркуш А4, шрифт Times New Roman, суцільна таблиця з рамками.
+• Перший рядок: «НАВАНТАЖЕННЯ (Прізвище І.О.) // канікули 26.10-01.11, 24.12-10.01, 22.03-28.03 // код». Програма сама бере з нього прізвище, код і КАНІКУЛИ.
+• Другий рядок: «№», «Понеділок», «Вівторок», «Середа», «Четвер», «П’ятниця».
+• Далі один рядок на один урок. У першій клітинці номер уроку жирним, а під ним час: 08.30-09.15.
+• Клітинка — це потік: «8-Б ІУ», «11 ІУ профіль», «9-Г Право». Порожня клітинка — уроку немає.
+• Чисельник / знаменник через косу рису: «8-Б ІУ / ГО» (у чисельник — 8-Б ІУ, у знаменник — 8-Б ГО); «/ 9-Г Право» — лише знаменник; «11 ІУ стандарт /» — лише чисельник.
+• Після 2-го уроку окремий червоний рядок «ХАРЧУВАННЯ У ЇДАЛЬНІ».
+
+ІУ — Історія України, ВІ — Всесвітня історія, ГО — Громадянська освіта, Право — Правознавство.
+
+КУДИ ЗАВАНТАЖУВАТИ: редактор → вкладка «Розклад» → перетягніть файл на таблицю або «Завантажити навантаження / розклад». Згенерувати такий документ (Word, JPEG) з вашого розкладу можна там само."""
+
+
 def build_sample_ktp(path):
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -121,6 +156,60 @@ def _copy(window, text, label="Промт скопійовано"):
     messagebox.showinfo("Буфер обміну", label + ". Вставте його (Ctrl+V) у свій ШІ-чат.", parent=window)
 
 
+def schedule_tab(book, win):
+    """Зразок розкладу: опис формату, картинка, готові файли й промт для ШІ."""
+    frame = ttk.Frame(book, padding=8)
+    book.add(frame, text="Зразок розкладу")
+    left = ttk.Frame(frame)
+    left.pack(side="left", fill="both", expand=True)
+    right = ttk.Frame(frame)
+    right.pack(side="left", fill="y", padx=(12, 0))
+    ttk.Label(left, text=SCHEDULE_DESCRIPTION, wraplength=640, justify="left").pack(anchor="w")
+    bar = ttk.Frame(left)
+    bar.pack(fill="x", pady=8)
+
+    def saver(title, builder, suffix, kinds, filename):
+        def run():
+            path = filedialog.asksaveasfilename(parent=win, title=title, defaultextension=suffix,
+                                                initialfile=filename, filetypes=kinds)
+            if not path:
+                return
+            try:
+                builder(path)
+                messagebox.showinfo("Зразок", f"Зразок збережено:\n{path}", parent=win)
+            except Exception as ex:
+                messagebox.showerror("Зразок", str(ex), parent=win)
+        return run
+    ttk.Button(bar, text="💾 Зразок Word", command=saver(
+        "Зберегти зразок розкладу (Word)", build_sample_workload, ".docx",
+        [("Word DOCX", "*.docx")], "Зразок_розкладу.docx")).pack(side="left")
+    ttk.Button(bar, text="🖼 Зразок JPEG", command=saver(
+        "Зберегти зразок розкладу (зображення)", build_sample_workload_jpeg, ".jpg",
+        [("Зображення JPEG", "*.jpg")], "Зразок_розкладу.jpg")).pack(side="left", padx=6)
+    ttk.Button(bar, text="📊 Зразок Excel (CSV)", command=saver(
+        "Зберегти зразок розкладу (CSV)", build_sample_workload_csv, ".csv",
+        [("CSV (Excel)", "*.csv")], "Зразок_розкладу.csv")).pack(side="left")
+    ttk.Button(bar, text="📋 Промт для ШІ",
+               command=lambda: _copy(win, WORKLOAD_PROMPT)).pack(side="left", padx=6)
+    ttk.Label(left, text="Точний промт, за яким ШІ (або людина) створить такий самий документ:").pack(anchor="w")
+    box = ScrolledText(left, wrap="word", font=("Segoe UI", 9), height=4)
+    box.insert("1.0", WORKLOAD_PROMPT)
+    box.pack(fill="both", expand=True)
+    ttk.Label(right, text="Приклад (умовні дані):", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    try:
+        import tempfile
+        from PIL import Image
+        folder = Path(tempfile.mkdtemp(prefix="pomichnyk_"))
+        jpg = build_sample_workload_jpeg(folder / "sample.jpg")
+        with Image.open(jpg) as picture:
+            width = 470
+            picture.resize((width, int(picture.height * width / picture.width))).save(folder / "sample.png")
+        win._sample_image = tk.PhotoImage(file=str(folder / "sample.png"))
+        ttk.Label(right, image=win._sample_image, relief="solid").pack(anchor="nw", pady=4)
+    except Exception as ex:                                  # без картинки вкладка все одно працює
+        ttk.Label(right, text=f"Попередній перегляд недоступний: {ex}", wraplength=420).pack(anchor="w")
+
+
 def show_samples(parent):
     win = tk.Toplevel(parent)
     win.title("Зразки документів, які розуміє програма")
@@ -158,15 +247,11 @@ def show_samples(parent):
         ttk.Button(bar, text="💾 Зберегти зразок (Word)…", command=save_sample).pack(side="left")
         ttk.Button(bar, text="📋 Копіювати промт для ШІ",
                    command=lambda: _copy(win, prompt)).pack(side="left", padx=8)
-        box = ScrolledText(frame, wrap="word", font=("Segoe UI", 10))
+        box = ScrolledText(frame, wrap="word", font=("Segoe UI", 10), height=8)
         box.insert("1.0", prompt)
         box.pack(fill="both", expand=True)
 
-    tab("Навантаження (розклад)",
-        "Розклад уроків у вашому форматі. Програма читає таку таблицю і сама визначає дні, "
-        "номери уроків, потоки та чисельник/знаменник; а так само створює такий документ "
-        "(Word і JPEG) кнопками «Згенерувати…» у вкладці «Розклад».",
-        WORKLOAD_PROMPT, build_sample_workload, "Зразок_Навантаження.docx")
+    schedule_tab(book, win)
     tab("Календарне планування (КТП)",
         "Таблиця «№ — Дата — Тема — Домашнє завдання». Програма підтягує теми, домашні "
         "завдання, назви розділів (рядки без номера пропускаються) та дати за класами.",
