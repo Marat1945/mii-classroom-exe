@@ -11,10 +11,20 @@ import webbrowser
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
-from .chatgpt_bridge import (DEFAULT_CHATGPT_URL, build_prompt, lesson_code,
-                             looks_like_answer, parse_answer, safe_chatgpt_url)
+from pathlib import Path
+
+from .chatgpt_bridge import (DEFAULT_CHATGPT_URL, best_lesson_for_file, build_prompt,
+                             lesson_code, looks_like_answer, match_score, parse_answer,
+                             safe_chatgpt_url)
+from .ui_kit import AccentButton
+try:
+    from tkinterdnd2 import DND_FILES
+except ImportError:
+    DND_FILES = None
+
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 from .engine import read_json, save_state
-from .window_ui import maximize_work_window
+from .window_ui import fit_work_window
 
 WEEKDAYS = ("понеділок", "вівторок", "середа", "четвер", "п’ятниця", "субота", "неділя")
 # Фізичні клавіші для Ctrl+… навіть за української розкладки.
@@ -43,9 +53,12 @@ class ChatGPTLectureDialog(tk.Toplevel):
         self._parse_job = None
         self._poll_job = None
         self._closing = False
+        self.escape_closes = True
+        self.dropped_docx = None
+        self.dropped_images = []
+        self.dropped_extra = []
         self.title("Лекція через мій ChatGPT — безкоштовно")
-        maximize_work_window(self)
-        self.minsize(900, 620)
+        fit_work_window(self,"normal")
         self.transient(app)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
@@ -56,30 +69,34 @@ class ChatGPTLectureDialog(tk.Toplevel):
     def _build(self):
         outer = ttk.Frame(self, padding=12)
         outer.pack(fill="both", expand=True)
-        self.header = ttk.Label(outer, font=("Segoe UI", 12, "bold"), foreground="#1F4E79")
+        self.header = ttk.Label(outer, font=("Segoe UI", 12, "bold"), foreground="#1F4E79", wraplength=940)
         self.header.pack(anchor="w")
-        self.topic_label = ttk.Label(outer, font=("Segoe UI", 11), wraplength=1150, justify="left")
+        self.topic_label = ttk.Label(outer, font=("Segoe UI", 11), wraplength=940, justify="left")
         self.topic_label.pack(anchor="w", pady=(2, 6))
         self.previous = ttk.Label(outer, foreground="#2E6B30")
         if self.batch:
             self.previous.pack(anchor="w")
-        steps = ("1) «Копіювати запит»  →  2) у ChatGPT вставте (Ctrl+V) і надішліть  →  "
-                 "3) під відповіддю ChatGPT натисніть «Копіювати»  →  4) поверніться сюди: "
-                 "відповідь з’явиться в нижньому полі сама (або вставте її)  →  "
-                 "5) «Створити Word».")
-        ttk.Label(outer, text=steps, wraplength=1150, justify="left",
+        steps = ("1) «Відкрити ChatGPT» — запит скопіюється сам  →  2) у ChatGPT натисніть Ctrl+V і "
+                 "Enter  →  3) коли ChatGPT створить файли, завантажте їх (Word і картинку)  →  "
+                 "4) перетягніть файли з Провідника в рамку нижче (або вставте текст відповіді)  →  "
+                 "5) «Прикріпити до уроку».")
+        ttk.Label(outer, text=steps, wraplength=940, justify="left",
                   foreground="#33475B").pack(anchor="w", pady=(4, 8))
         bar = ttk.Frame(outer)
         bar.pack(fill="x", pady=(0, 6))
-        ttk.Button(bar, text="📋 Копіювати запит", command=self.copy_prompt).pack(side="left")
-        ttk.Button(bar, text="🌐 Відкрити ChatGPT", command=self.open_chatgpt).pack(side="left", padx=6)
+        AccentButton(bar, "🌐 Відкрити ChatGPT (запит копіюється сам)",
+                     self.open_chatgpt).pack(side="left")
+        ttk.Button(bar, text="📋 Копіювати запит", command=self.copy_prompt).pack(side="left", padx=8)
         self.auto = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="Підхоплювати відповідь із буфера обміну автоматично",
+        ttk.Checkbutton(bar, text="Підхоплювати текстову відповідь з буфера",
                         variable=self.auto).pack(side="left", padx=10)
+        bar2 = ttk.Frame(outer)
+        bar2.pack(fill="x", pady=(0, 6))
         self.url = tk.StringVar(value=safe_chatgpt_url(
             self.app.state.get("chatgpt_url", DEFAULT_CHATGPT_URL)))
-        ttk.Entry(bar, textvariable=self.url, width=34).pack(side="right")
-        ttk.Label(bar, text="Адреса ChatGPT (можна посилання на свій проєкт):").pack(side="right", padx=4)
+        self.url.trace_add("write", lambda *_: self._save_url_if_valid())
+        ttk.Label(bar2, text="Адреса ChatGPT (можна посилання на свій проєкт):").pack(side="left")
+        ttk.Entry(bar2, textvariable=self.url).pack(side="left", fill="x", expand=True, padx=6)
 
         panes = ttk.PanedWindow(outer, orient="vertical")
         panes.pack(fill="both", expand=True)
@@ -90,18 +107,32 @@ class ChatGPTLectureDialog(tk.Toplevel):
                   ).pack(anchor="w")
         self.prompt = ScrolledText(top, wrap="word", height=10, font=("Segoe UI", 10))
         self.prompt.pack(fill="both", expand=True)
-        ttk.Label(bottom, text="Відповідь ChatGPT:").pack(anchor="w", pady=(6, 0))
-        self.answer = ScrolledText(bottom, wrap="word", height=14, font=("Segoe UI", 10))
+        self.drop_label = tk.Label(
+            bottom, bg="#EAF2FA", fg="#164F82", relief="groove", bd=2, pady=12,
+            font=("Segoe UI", 10, "bold"),
+            text=("⬇  Перетягніть сюди з Провідника файли від ChatGPT: Word (.docx) та інфографіку (PNG/JPG)"
+                  if DND_FILES else "Файли від ChatGPT додайте кнопкою «Додати файли…» нижче"))
+        self.drop_label.pack(fill="x", pady=(6, 2))
+        row = ttk.Frame(bottom)
+        row.pack(fill="x")
+        self.files_label = ttk.Label(row, text="", foreground="#2E6B30", wraplength=600)
+        self.files_label.pack(side="left")
+        ttk.Button(row, text="Додати файли…", command=self.pick_files).pack(side="right")
+        ttk.Button(row, text="Очистити файли", command=self.clear_files).pack(side="right", padx=6)
+        ttk.Label(bottom, text="…або відповідь ChatGPT текстом (якщо файли не створено):"
+                  ).pack(anchor="w", pady=(4, 0))
+        self.answer = ScrolledText(bottom, wrap="word", height=7, font=("Segoe UI", 10))
         self.answer.pack(fill="both", expand=True)
+        self._setup_drop()
         for widget in (self.prompt, self.answer):
             self._text_tools(widget)
         self.answer.bind("<<Modified>>", self._answer_changed)
 
-        self.status = ttk.Label(outer, text="", wraplength=1150, justify="left")
+        self.status = ttk.Label(outer, text="", wraplength=940, justify="left")
         self.status.pack(anchor="w", pady=(8, 4))
         buttons = ttk.Frame(outer)
         buttons.pack(fill="x")
-        self.create_button = ttk.Button(buttons, text="✅ Створити Word для уроку",
+        self.create_button = ttk.Button(buttons, text="✅ Прикріпити до уроку",
                                         command=self.create_word, state="disabled")
         self.create_button.pack(side="left")
         if self.batch:
@@ -184,6 +215,7 @@ class ChatGPTLectureDialog(tk.Toplevel):
         self.prompt.insert("1.0", build_prompt(lesson, plan_lessons))
         self.answer.delete("1.0", "end")
         self.answer.edit_modified(False)
+        self.clear_files()
         try:
             self._last_clipboard = self.clipboard_get()
         except tk.TclError:
@@ -204,26 +236,145 @@ class ChatGPTLectureDialog(tk.Toplevel):
             save_state(self.app.state)
         return url
 
-    def copy_prompt(self):
+    def _copy_prompt_text(self):
         text = self.prompt.get("1.0", "end-1c").strip()
         self.clipboard_clear()
         self.clipboard_append(text)
         self.update_idletasks()
         self._last_clipboard = text
+
+    def copy_prompt(self):
+        self._copy_prompt_text()
         message = "Запит скопійовано. У ChatGPT вставте його (Ctrl+V) і надішліть."
         if not self._opened_browser:
-            self.open_chatgpt()
+            self.open_chatgpt(copy=False)
             message += " ChatGPT відкрито в браузері."
         self._set_status(message, "#1F4E79")
 
-    def open_chatgpt(self):
+    def open_chatgpt(self, copy=True):
+        if copy:
+            self._copy_prompt_text()
         url = self._remember_url()
         self._opened_browser = True
         try:
             webbrowser.open(url)
+            if copy:
+                self._set_status("ChatGPT відкрито, запит УЖЕ скопійовано: у ChatGPT натисніть Ctrl+V "
+                                 "(у полі повідомлення) і Enter.", "#1F4E79")
         except Exception as ex:   # браузер недоступний — запит усе одно в буфері
             messagebox.showwarning("ChatGPT", f"Не вдалося відкрити браузер: {ex}\n"
                                    f"Відкрийте вручну: {url}", parent=self)
+
+    def _save_url_if_valid(self):
+        value = self.url.get().strip()
+        if value.startswith("https://") and " " not in value \
+                and self.app.state.get("chatgpt_url") != value:
+            self.app.state["chatgpt_url"] = value
+            try:
+                save_state(self.app.state)
+            except Exception:
+                pass
+
+    # ---------- файли від ChatGPT ----------
+    def _setup_drop(self):
+        if not DND_FILES:
+            return
+        for widget in (self.drop_label, self.answer):
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<DropEnter>>", self._drop_enter)
+            widget.dnd_bind("<<DropLeave>>", self._drop_leave)
+            widget.dnd_bind("<<Drop>>", self._drop_files)
+
+    def _drop_enter(self, _event=None):
+        self.drop_label.config(bg="#FFE49A")
+        return "copy"
+
+    def _drop_leave(self, _event=None):
+        self.drop_label.config(bg="#EAF2FA")
+        return "copy"
+
+    def _drop_files(self, event):
+        self._drop_leave()
+        try:
+            names = list(self.tk.splitlist(event.data))
+        except tk.TclError:
+            return "copy"
+        self.receive_files(names)
+        return "copy"
+
+    def pick_files(self):
+        from tkinter import filedialog
+        names = filedialog.askopenfilenames(parent=self, title="Файли від ChatGPT (Word, зображення)")
+        if names:
+            self.receive_files(list(names))
+
+    def clear_files(self):
+        self.dropped_docx = None
+        self.dropped_images = []
+        self.dropped_extra = []
+        if hasattr(self, "files_label"):
+            self.files_label.config(text="")
+
+    def receive_files(self, names):
+        from .material_library import check_real_docx
+        problems = []
+        for raw in names:
+            path = Path(raw)
+            if not path.is_file():
+                continue
+            suffix = path.suffix.casefold()
+            if suffix == ".docx":
+                try:
+                    check_real_docx(path)
+                except ValueError as ex:
+                    problems.append(f"{path.name}: {ex}")
+                    continue
+                self.dropped_docx = path
+            elif suffix in IMAGE_SUFFIXES:
+                if path not in self.dropped_images:
+                    self.dropped_images.append(path)
+            elif suffix in (".txt", ".md"):
+                try:
+                    self.answer.delete("1.0", "end")
+                    self.answer.insert("1.0", path.read_text(encoding="utf-8-sig"))
+                except (OSError, UnicodeDecodeError) as ex:
+                    problems.append(f"{path.name}: {ex}")
+            else:
+                if path not in self.dropped_extra:
+                    self.dropped_extra.append(path)
+        self._refresh_files_status(problems)
+
+    def _docx_text(self, path):
+        try:
+            from docx import Document
+            return "\n".join(p.text for p in Document(path).paragraphs[:40])
+        except Exception:
+            return ""
+
+    def _refresh_files_status(self, problems=()):
+        parts = []
+        warning = ""
+        if self.dropped_docx:
+            parts.append(f"Word: {self.dropped_docx.name}")
+            if match_score(self.lesson, self.dropped_docx.name, self._docx_text(self.dropped_docx)) < 2:
+                warning = (" ⚠ У назві чи тексті Word не знайдено теми цього уроку — "
+                           "переконайтеся, що це лекція саме для нього.")
+        if self.dropped_images:
+            parts.append("зображень: " + str(len(self.dropped_images)))
+        if self.dropped_extra:
+            parts.append("інших файлів: " + str(len(self.dropped_extra)))
+        self.files_label.config(
+            text=("✅ " + "; ".join(parts) + warning) if parts else "",
+            foreground="#9B6A00" if warning else "#2E6B30")
+        if problems:
+            messagebox.showwarning("Файли", "\n".join(problems), parent=self)
+        if self.dropped_docx:
+            self.create_button.config(state="normal")
+            self._set_status("Файли отримано. Натисніть «Прикріпити до уроку»: Word потрапить у "
+                             "програму й у чернетку Classroom, зображення — у вкладення.",
+                             "#2E6B30")
+        elif not self.answer.get("1.0", "end-1c").strip():
+            self.create_button.config(state="disabled")
 
     def _answer_changed(self, _event=None):
         if not self.answer.edit_modified():
@@ -278,9 +429,42 @@ class ChatGPTLectureDialog(tk.Toplevel):
             if not self._closing:
                 self._poll_job = self.after(self.POLL_MS, self._poll_clipboard)
 
+    def _create_from_files(self):
+        lesson = self.lesson
+        extras = list(self.dropped_images) + list(self.dropped_extra)
+        try:
+            path, attached, skipped = self.app.save_dropped_lecture(
+                lesson, self.dropped_docx, extras, replace_existing=self.replace_existing)
+        except PermissionError:
+            messagebox.showerror("Word", "Не вдалося записати Word: файл, імовірно, відкритий у Word.\n"
+                                 "Закрийте його й спробуйте ще раз.", parent=self)
+            return
+        except Exception as ex:
+            messagebox.showerror("Word", str(ex), parent=self)
+            return
+        self.created.append((lesson, attached, path))
+        own = any(x.unique_key == lesson.unique_key for x in attached)
+        note = (f"✅ {lesson.stream}: Word і файли прикріплено, уроків: {len(attached)}."
+                if own else
+                f"⚠ {lesson.stream}: Word збережено в бібліотеці, але до цього уроку НЕ прив’язано "
+                "(для нього вже є чернетка Google або підтверджений Word).")
+        if skipped:
+            note += "\nДеякі вкладення не додано: " + skipped
+        if self.batch:
+            self.previous.config(text="Попередній урок — " + note)
+            self.position += 1
+            self.show_current()
+        else:
+            messagebox.showinfo("Лекцію прикріплено", note + "\n\nУ Classroom нічого не створено. "
+                                "Відкрийте Word і перевірте факти перед чернеткою.", parent=self)
+            self.close()
+
     def create_word(self):
         lesson = self.lesson
         if lesson is None:
+            return
+        if self.dropped_docx and not self.answer.get("1.0", "end-1c").strip():
+            self._create_from_files()
             return
         result = parse_answer(self.answer.get("1.0", "end-1c"), self.code)
         if result["errors"]:
@@ -348,6 +532,7 @@ class ChatGPTLectureDialog(tk.Toplevel):
 
     def close(self):
         self._closing = True
+        self._save_url_if_valid()
         for job in (self._poll_job, self._parse_job):
             if job:
                 try:
@@ -360,3 +545,273 @@ class ChatGPTLectureDialog(tk.Toplevel):
 
 def open_chatgpt_dialog(app, lessons, batch=False, replace_existing=False):
     return ChatGPTLectureDialog(app, lessons, batch=batch, replace_existing=replace_existing)
+
+
+def _plan_lessons_of(lesson):
+    try:
+        from .engine import read_json
+        return read_json("Календарні плани.json").get(lesson.plan_id, {}).get("lessons")
+    except Exception:
+        return None
+
+
+def build_day_prompt(lessons):
+    """Один спільний запит на всі уроки дня: кожен урок — окреме завдання з власними файлами."""
+    from .chatgpt_bridge import PROMPT_MARKER
+    total = len(lessons)
+    lines = [
+        f"{PROMPT_MARKER} — лекції на весь день ({total} " + ("урок" if total == 1 else "уроків") + ")",
+        "",
+        "Нижче "+str(total)+" окремих завдань — по одному на кожен урок. Виконай їх ПОСЛІДОВНО. "
+        "Для КОЖНОГО уроку створи його власні два файли (Word і PNG-інфографіка) з ТОЧНИМИ іменами, "
+        "вказаними в завданні. Після всіх завдань напиши в чаті по одному рядку на урок: "
+        "«Готово. КОД УРОКУ: …» — і дай посилання на всі файли. Лекції в чат не переписуй.",
+        "",
+    ]
+    for number, lesson in enumerate(lessons, 1):
+        lines.append(f"==================== ЗАВДАННЯ {number} з {total} ====================")
+        lines.append(build_prompt(lesson, _plan_lessons_of(lesson)))
+        lines.append("")
+    return "\n".join(lines)
+
+
+class ChatGPTDayDialog(tk.Toplevel):
+    """Усі лекції дня одним запитом; готові файли перетягуються разом і розкладаються по уроках."""
+
+    def __init__(self, app, lessons):
+        super().__init__(app)
+        self.app = app
+        self.lessons = list(lessons)
+        self.docx = {}            # індекс уроку → шлях до Word
+        self.images = {}          # індекс уроку → список зображень
+        self.unassigned = []
+        self._opened = False
+        self.escape_closes = True
+        day = self.lessons[0].day
+        self.title(f"Лекції ГПТ на весь день — {day[8:10]}.{day[5:7]}.{day[:4]}")
+        fit_work_window(self, "normal")
+        self.transient(app)
+        self._build()
+        self.refresh()
+
+    def _build(self):
+        outer = ttk.Frame(self, padding=12)
+        outer.pack(fill="both", expand=True)
+        ttk.Label(outer, font=("Segoe UI", 12, "bold"), foreground="#1F4E79",
+                  text=f"Уроків, для яких потрібна лекція: {len(self.lessons)}").pack(anchor="w")
+        ttk.Label(outer, wraplength=1000, justify="left", foreground="#33475B", text=(
+            "1) «Відкрити ChatGPT» — спільний запит скопіюється сам  →  2) у ChatGPT Ctrl+V і Enter  →  "
+            "3) завантажте всі створені файли (Word і PNG)  →  4) перетягніть УСІ файли разом у рамку "
+            "нижче — програма розкладе їх по уроках  →  5) «Прикріпити всі».")).pack(anchor="w", pady=(2, 6))
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x", pady=(0, 6))
+        AccentButton(bar, "🌐 Відкрити ChatGPT (запит копіюється сам)", self.open_chatgpt,
+                     color="#2E8B57", hover="#3AA36B").pack(side="left")
+        ttk.Button(bar, text="📋 Копіювати запит", command=self.copy_prompt).pack(side="left", padx=8)
+        self.url = tk.StringVar(value=safe_chatgpt_url(
+            self.app.state.get("chatgpt_url", DEFAULT_CHATGPT_URL)))
+        self.url.trace_add("write", lambda *_: self._save_url())
+        ttk.Entry(bar, textvariable=self.url, width=34).pack(side="right")
+        ttk.Label(bar, text="Адреса ChatGPT:").pack(side="right", padx=4)
+
+        columns = ("num", "stream", "topic", "word", "pictures")
+        self.table = ttk.Treeview(outer, columns=columns, show="headings", height=6)
+        for name, title, width in (("num", "КТП №", 60), ("stream", "Потік", 150),
+                                   ("topic", "Тема", 520), ("word", "Word", 90),
+                                   ("pictures", "Зображення", 100)):
+            self.table.heading(name, text=title)
+            self.table.column(name, width=width, anchor="w")
+        self.table.pack(fill="x")
+        panes = ttk.PanedWindow(outer, orient="vertical")
+        panes.pack(fill="both", expand=True, pady=(8, 0))
+        top, bottom = ttk.Frame(panes), ttk.Frame(panes)
+        panes.add(top, weight=2)
+        panes.add(bottom, weight=2)
+        self.prompt = ScrolledText(top, wrap="word", height=6, font=("Segoe UI", 9))
+        self.prompt.insert("1.0", build_day_prompt(self.lessons))
+        self.prompt.pack(fill="both", expand=True)
+        self.drop_label = tk.Label(
+            bottom, bg="#EAF2FA", fg="#164F82", relief="groove", bd=2, pady=14,
+            font=("Segoe UI", 10, "bold"),
+            text=("⬇  Перетягніть сюди ВСІ файли від ChatGPT (Word і картинки) разом"
+                  if DND_FILES else "Файли від ChatGPT додайте кнопкою «Додати файли…»"))
+        self.drop_label.pack(fill="x")
+        row = ttk.Frame(bottom)
+        row.pack(fill="x", pady=4)
+        self.note = ttk.Label(row, text="", wraplength=800, foreground="#2E6B30")
+        self.note.pack(side="left")
+        ttk.Button(row, text="Додати файли…", command=self.pick_files).pack(side="right")
+        ttk.Label(bottom, text="Файли, які не вдалося розпізнати (двічі клацніть, щоб вибрати урок):"
+                  ).pack(anchor="w")
+        self.unknown = tk.Listbox(bottom, height=3)
+        self.unknown.pack(fill="both", expand=True)
+        self.unknown.bind("<Double-1>", self._assign_menu)
+        if DND_FILES:
+            for widget in (self.drop_label, self.unknown):
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<DropEnter>>", lambda e: (self.drop_label.config(bg="#FFE49A"), "copy")[1])
+                widget.dnd_bind("<<DropLeave>>", lambda e: (self.drop_label.config(bg="#EAF2FA"), "copy")[1])
+                widget.dnd_bind("<<Drop>>", self._drop)
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(8, 0))
+        AccentButton(buttons, "✅ Прикріпити всі", self.attach_all).pack(side="left")
+        ttk.Button(buttons, text="Закрити", command=self.close).pack(side="right")
+
+    # ---- запит ----
+    def _save_url(self):
+        value = self.url.get().strip()
+        if value.startswith("https://") and " " not in value \
+                and self.app.state.get("chatgpt_url") != value:
+            self.app.state["chatgpt_url"] = value
+            try:
+                save_state(self.app.state)
+            except Exception:
+                pass
+
+    def _copy(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.prompt.get("1.0", "end-1c").strip())
+        self.update_idletasks()
+
+    def copy_prompt(self):
+        self._copy()
+        self.note.config(text="Запит скопійовано. У ChatGPT натисніть Ctrl+V і Enter.", foreground="#1F4E79")
+
+    def open_chatgpt(self):
+        self._copy()
+        url = safe_chatgpt_url(self.url.get())
+        try:
+            webbrowser.open(url)
+            self.note.config(text="ChatGPT відкрито, запит УЖЕ скопійовано: Ctrl+V у полі повідомлення і Enter.",
+                             foreground="#1F4E79")
+        except Exception as ex:
+            messagebox.showwarning("ChatGPT", f"Не вдалося відкрити браузер: {ex}\n{url}", parent=self)
+
+    # ---- файли ----
+    def _drop(self, event):
+        self.drop_label.config(bg="#EAF2FA")
+        try:
+            names = list(self.tk.splitlist(event.data))
+        except tk.TclError:
+            return "copy"
+        self.receive_files(names)
+        return "copy"
+
+    def pick_files(self):
+        from tkinter import filedialog
+        names = filedialog.askopenfilenames(parent=self, title="Файли від ChatGPT")
+        if names:
+            self.receive_files(list(names))
+
+    def _docx_text(self, path):
+        try:
+            from docx import Document
+            return "\n".join(p.text for p in Document(path).paragraphs[:40])
+        except Exception:
+            return ""
+
+    def receive_files(self, names):
+        from .material_library import check_real_docx
+        problems = []
+        for raw in names:
+            path = Path(raw)
+            if not path.is_file():
+                continue
+            suffix = path.suffix.casefold()
+            text = ""
+            if suffix == ".docx":
+                try:
+                    check_real_docx(path)
+                except ValueError as ex:
+                    problems.append(f"{path.name}: {ex}")
+                    continue
+                text = self._docx_text(path)
+            elif suffix not in IMAGE_SUFFIXES:
+                problems.append(f"{path.name}: очікується Word або зображення.")
+                continue
+            lesson = best_lesson_for_file(self.lessons, path.name, text)
+            if lesson is None:
+                if path not in self.unassigned:
+                    self.unassigned.append(path)
+                continue
+            self._assign(self.lessons.index(lesson), path)
+        self.refresh()
+        if problems:
+            messagebox.showwarning("Файли", "\n".join(problems), parent=self)
+
+    def _assign(self, index, path):
+        if path.suffix.casefold() == ".docx":
+            self.docx[index] = path
+        else:
+            bucket = self.images.setdefault(index, [])
+            if path not in bucket:
+                bucket.append(path)
+        if path in self.unassigned:
+            self.unassigned.remove(path)
+
+    def _assign_menu(self, event):
+        picked = self.unknown.nearest(event.y)
+        if picked < 0 or picked >= len(self.unassigned):
+            return
+        path = self.unassigned[picked]
+        menu = tk.Menu(self, tearoff=False)
+        for index, lesson in enumerate(self.lessons):
+            menu.add_command(label=f"{lesson.stream}: {lesson.topic[:70]}",
+                             command=lambda i=index: (self._assign(i, path), self.refresh()))
+        menu.tk_popup(event.x_root, event.y_root)
+        menu.grab_release()
+
+    def refresh(self):
+        for item in self.table.get_children():
+            self.table.delete(item)
+        for index, lesson in enumerate(self.lessons):
+            self.table.insert("", "end", iid=str(index), values=(
+                lesson.lesson_number, lesson.stream, lesson.topic[:110],
+                "✅" if index in self.docx else "—",
+                len(self.images.get(index, [])) or "—"))
+        self.unknown.delete(0, "end")
+        for path in self.unassigned:
+            self.unknown.insert("end", path.name)
+        ready = len(self.docx)
+        self.note.config(text=f"Розпізнано Word: {ready} з {len(self.lessons)}."
+                         + (f" Нерозпізнаних файлів: {len(self.unassigned)}." if self.unassigned else ""),
+                         foreground="#2E6B30" if ready else "#33475B")
+
+    def attach_all(self):
+        if not self.docx:
+            messagebox.showinfo("Лекції", "Спершу додайте файли Word від ChatGPT.", parent=self)
+            return
+        done, warnings = 0, []
+        for index, path in sorted(self.docx.items()):
+            lesson = self.lessons[index]
+            try:
+                _, attached, skipped = self.app.save_dropped_lecture(
+                    lesson, path, self.images.get(index, []))
+            except Exception as ex:
+                warnings.append(f"{lesson.stream}: {ex}")
+                continue
+            done += 1
+            if not any(x.unique_key == lesson.unique_key for x in attached):
+                warnings.append(f"{lesson.stream}: Word збережено в бібліотеці, але урок уже має чернетку "
+                                "або підтверджений Word.")
+            if skipped:
+                warnings.append(f"{lesson.stream}: {skipped}")
+        text = f"Прикріплено лекцій: {done} з {len(self.lessons)}."
+        if len(self.docx) < len(self.lessons):
+            text += f"\nБез Word залишилось уроків: {len(self.lessons) - len(self.docx)}."
+        if warnings:
+            text += "\n\n" + "\n".join(warnings[:6])
+        messagebox.showinfo("Лекції за день", text + "\n\nУ Classroom нічого не створено. "
+                            "Перевірте Word перед чернетками.", parent=self)
+        self.close()
+
+    def close(self):
+        self._save_url()
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
+def open_day_dialog(app, lessons):
+    return ChatGPTDayDialog(app, lessons)

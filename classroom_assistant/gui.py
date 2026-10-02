@@ -6,11 +6,14 @@ from datetime import date,timedelta,datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
-from .engine import read_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, html_classroom_text, DATA, ROOT
+from .engine import read_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, word_path, html_classroom_text, DATA, ROOT
 from .documents import create_word
 from .material_library import (parallel_matches,add_document,attach_document,find_for_lesson,signature_key,signature,stream_subject,check_real_docx,copy_for_lesson)
 from .attachments import add_attachments, files_for_lesson, copy_attachments, remove_attachment
-from .window_ui import maximize_work_window
+from .window_ui import maximize_work_window, fit_work_window
+from .ui_kit import AccentButton
+from .hotkeys import install_hotkeys
+from .theme import apply_theme, make_banner
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     WindowBase = TkinterDnD.Tk
@@ -50,18 +53,27 @@ def weekday_ua(value):
 class MainApp(WindowBase):
     def __init__(self):
         super().__init__()
-        self.title("Асистент уроків • Classroom • універсальна версія 3.4")
+        self.title("Асистент уроків • Classroom • універсальна версія 3.5")
         self.geometry("1250x770")
         self.minsize(1060,630)
         maximize_work_window(self)
         self.cfg=read_json("Налаштування.json")
         self.state=read_state()
+        self.escape_closes=False
+        apply_theme(self)
+        install_hotkeys(self)
+        make_banner(self,"🎓  Помічник учителя Classroom",
+                    "розклад  •  календарні плани  •  лекції через ChatGPT  •  чернетки Google Classroom"
+                    ).pack(fill="x")
+        self._sync_running=False
         self.rows=[]
         self.google_courses=[]
         # Дані лише для перегляду, не змінюють локальні КТП і Google-чернетки.
         self.remote_classroom_entries={}
         self._build()
         self.update_day()
+        # Одразу після запуску підтягнути актуальний стан Classroom (без вікна входу).
+        self.after(1500,lambda:self.sync_classroom(interactive=False))
 
     def _build(self):
         outer=ttk.Frame(self,padding=12)
@@ -78,8 +90,15 @@ class MainApp(WindowBase):
         self.weekday.pack(side="left",padx=(5,8))
         ttk.Button(hdr,text="←",width=4,command=lambda:self.shift(-1)).pack(side="left")
         ttk.Button(hdr,text="→",width=4,command=lambda:self.shift(1)).pack(side="left")
+        ttk.Button(hdr,text="ПОЧАТКОВЕ НАЛАШТУВАННЯ",
+                   command=self.setup_dialog).pack(side="left",padx=(16,0))
         self.phase=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"))
         self.phase.pack(side="left",padx=15)
+        ttk.Button(hdr,text="Підключити Google / одержати курси",
+                   command=self.connect_google).pack(side="left")
+        ttk.Button(hdr,text="🗂 Мої дані",command=self.data_dialog).pack(side="right")
+        ttk.Button(hdr,text="📄 Зразки документів",
+                   command=self.samples_dialog).pack(side="right",padx=6)
 
         cols=("№","Час","Потік","Курс Classroom","Тема","КТП","Стан")
         self.grid_columns=cols
@@ -119,21 +138,19 @@ class MainApp(WindowBase):
             self.grid.dnd_bind("<<Drop>>",self._drop_on_lesson)
 
         actions=ttk.Frame(outer);actions.pack(fill="x",pady=9)
+        AccentButton(actions,"✨ Word-лекція через мій ChatGPT",
+                     self.chatgpt_word).pack(side="left",padx=(3,4))
+        AccentButton(actions,"✨ Лекції ГПТ на весь день",self.chatgpt_batch,
+                     color="#2E8B57",hover="#3AA36B").pack(side="left",padx=4)
         for title,callback in [
             ("Word: заготовка",lambda:self.make_word(False)),
-            ("Word: лекція через ChatGPT",self.chatgpt_word),
-            ("ВСІ Word за день (ChatGPT)",self.chatgpt_batch),
             ("Вибрати готовий Word",self.choose_docx),
             ("Бібліотека Word",self.library_dialog),
             ("Папка Word",self.open_folder),
         ]:
             ttk.Button(actions,text=title,command=callback).pack(side="left",padx=3)
         actions2=ttk.Frame(outer);actions2.pack(fill="x",pady=2)
-        ttk.Button(actions2,text="ПОЧАТКОВЕ НАЛАШТУВАННЯ",command=self.setup_dialog).pack(side="left",padx=3)
-        ttk.Button(actions2,text="Підключити Google / одержати курси",command=self.get_courses).pack(side="left",padx=3)
         ttk.Button(actions2,text="Зіставити курси",command=self.map_courses).pack(side="left",padx=3)
-        ttk.Button(actions2,text="Копіювати повідомлення",command=self.copy_classroom).pack(side="left",padx=3)
-        ttk.Button(actions2,text="Зберегти опис уроку",command=self.save_classroom_description).pack(side="left",padx=3)
         ttk.Button(actions2,text="Зберегти шаблон паралелі",command=self.save_parallel_description).pack(side="left",padx=3)
         self.assignment=tk.BooleanVar(value=False)
         ttk.Checkbutton(actions2,text="Це завдання для здавання (не матеріал)",variable=self.assignment).pack(side="left",padx=8)
@@ -345,7 +362,7 @@ class MainApp(WindowBase):
         else:
             if not messagebox.askyesno("Word-заготовка","Створити ТІЛЬКИ порожню заготовку? Учням її надсилати НЕ можна."):
                 return
-        destination=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
+        destination=word_path(lesson)
         def task():
             material=None
             if with_ai:
@@ -395,7 +412,7 @@ class MainApp(WindowBase):
                     made.append((lesson,existing))
                     continue
                 material=generate_full_lesson(lesson,self.cfg.get("ai_model","gpt-5"))
-                destination=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
+                destination=word_path(lesson)
                 path=create_word(lesson,destination,material)
                 item=add_document(path,lesson,self.cfg,origin="AI")
                 made.append((lesson,item))
@@ -467,18 +484,37 @@ class MainApp(WindowBase):
         if not messagebox.askyesno("Лекції за день через ChatGPT",
               (f"З бібліотеки прив'язано готових лекцій: {reused}.\n\n" if reused else "")
               +f"Нові лекції потрібні для {len(pending)} уроків:\n{names}\n\n"
-              "Програма по черзі покаже запит для кожного. Продовжити?"):
+              "Програма підготує ОДИН спільний запит для ChatGPT на всі ці уроки; готові файли "
+              "ви перетягнете разом, а програма розкладе їх по уроках. Продовжити?"):
             return
-        from .chatgpt_ui import open_chatgpt_dialog
-        open_chatgpt_dialog(self,pending,batch=True)
+        from .chatgpt_ui import open_day_dialog
+        open_day_dialog(self,pending)
 
     def save_chatgpt_lecture(self,lesson,material,replace_existing=False):
         """Word із відповіді ChatGPT → бібліотека → сумісна паралель. Google не змінюється."""
-        destination=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
+        destination=word_path(lesson)
         path=create_word(lesson,destination,material)
         attached=self._attach_from_master(path,lesson,"ChatGPT",
                                           replace_existing=replace_existing)
         return path,attached
+
+    def save_dropped_lecture(self,lesson,docx_path,extra_files=(),replace_existing=False):
+        """Готовий Word від ChatGPT + інфографіка → бібліотека → паралелі → вкладення."""
+        check_real_docx(docx_path)
+        destination=word_path(lesson)
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        if Path(docx_path).resolve()!=destination.resolve():
+            shutil.copy2(docx_path,destination)
+        attached=self._attach_from_master(destination,lesson,"ChatGPT (файл)",
+                                          replace_existing=replace_existing)
+        problems=[]
+        for target in attached:
+            if not extra_files:break
+            try:add_attachments(self.state,target.unique_key,list(extra_files))
+            except Exception as ex:problems.append(str(ex))
+        if extra_files:
+            save_state(self.state);self.refresh_attachment_previews()
+        return destination,attached,"; ".join(dict.fromkeys(problems))
 
     def choose_docx(self):
         lesson=self.selected()
@@ -751,9 +787,24 @@ class MainApp(WindowBase):
                          command=lambda:self.borrow_lesson("future"))
         menu.add_separator()
         menu.add_command(label="Лекція через мій ChatGPT…",command=self.chatgpt_word)
+        menu.add_command(label="Лекції ГПТ на весь день…",command=self.chatgpt_batch)
+        menu.add_command(label="Word: заготовка",command=lambda:self.make_word(False))
         menu.add_command(label="Вибрати готовий Word…",command=self.choose_docx)
+        menu.add_command(label="Бібліотека Word…",command=self.library_dialog)
         menu.add_command(label="Додати файли до Classroom…",command=self.choose_attachments)
         menu.add_command(label="Відкрити папку Word",command=self.open_folder)
+        menu.add_separator()
+        menu.add_command(label="Редагувати тему / Д/з цього уроку в КТП…",
+                         command=self.edit_lesson_in_ktp)
+        menu.add_command(label="Копіювати повідомлення Classroom",command=self.copy_classroom)
+        menu.add_command(label="Зберегти опис цього уроку",command=self.save_classroom_description)
+        menu.add_command(label="Зберегти шаблон для паралелі",command=self.save_parallel_description)
+        menu.add_separator()
+        menu.add_command(label="Створити ЧЕРНЕТКУ в Classroom…",command=self.draft)
+        menu.add_command(label="Створити чернетки для всього дня…",command=self.batch_drafts)
+        menu.add_command(label="Мій Classroom — перегляд",command=self.view_classroom)
+        menu.add_command(label="Оновити стан із Classroom",
+                         command=lambda:self.sync_classroom(interactive=False,manual=True))
         menu.add_separator()
         menu.add_command(label="Прибрати ЛОКАЛЬНІ матеріали (Delete)",
                          command=self.remove_selected_local_materials)
@@ -788,7 +839,7 @@ class MainApp(WindowBase):
             return
         win=tk.Toplevel(self)
         win.title("Виберіть попередню роботу" if when=="past" else "Виберіть майбутню роботу")
-        win.transient(self);maximize_work_window(win)
+        win.transient(self);fit_work_window(win,"normal")
         ttk.Label(win,text="Будуть перенесені тема, опис Classroom, готовий Word і вкладення. "
                   "Дата уроку стане поточною. Автоприв'язка для різних КТП/годин заборонена; "
                   "тут дозволяється ЛИШЕ ваш ручний вибір. КТП не змінюється.",
@@ -944,7 +995,7 @@ class MainApp(WindowBase):
                   and Path(item['path']).is_file()]
         if not matching:
             messagebox.showinfo("Бібліотека","Відповідної лекції немає. Натисніть «Вибрати готовий Word», щоб додати її.");return
-        win=tk.Toplevel(self);win.title("Бібліотека перевірених лекцій");maximize_work_window(win)
+        win=tk.Toplevel(self);win.title("Бібліотека перевірених лекцій");fit_work_window(win,"normal")
         ttk.Label(win,text="Показано лише лекції з тим самим предметом, програмою, годинами і темою.").pack(anchor="w",padx=12,pady=8)
         box=tk.Listbox(win,height=9)
         box.pack(fill="both",expand=True,padx=12,pady=10)
@@ -1042,7 +1093,7 @@ class MainApp(WindowBase):
         from tkinter import simpledialog
         dlg=tk.Toplevel(self)
         dlg.title("Перший запуск • Google, ChatGPT та AI")
-        maximize_work_window(dlg)
+        fit_work_window(dlg,"normal")
         dlg.transient(self)
         text=(
             "РОЗКЛАД І КТП вже працюють локально, навіть без налаштувань.\n\n"
@@ -1094,6 +1145,74 @@ class MainApp(WindowBase):
         ttk.Button(buttons,text="Зберегти AI-ключ (платний режим)",command=save_key).pack(side="left",padx=5)
         ttk.Button(buttons,text="Закрити",command=dlg.destroy).pack(side="right",padx=5)
 
+    def connect_google(self):
+        """Кнопка зверху: вхід у Google (за потреби) і та сама синхронізація, що при запуску."""
+        self.sync_classroom(interactive=True)
+
+    def sync_classroom(self,interactive=False,manual=False):
+        """Курси (у порядку Classroom) + стан усіх наявних матеріалів. Лише читання."""
+        if self._sync_running:return
+        from . import google_client
+        if not interactive and not google_client.token_ready():
+            self.foot.config(text="Google ще не підключено: натисніть «Підключити Google / одержати курси».")
+            if manual:
+                messagebox.showinfo("Google","Спочатку натисніть «Підключити Google / одержати курси».")
+            return
+        self._sync_running=True
+        titles=list(self.cfg.get("classroom_course_titles",[]))
+        known=dict(self.state.get("course_ids",{}))
+        def progress(text):
+            self.after(0,lambda:self.foot.config(text=text))
+        def run():
+            try:
+                result=google_client.sync_everything(titles,known,progress)
+                self.after(0,lambda:self._sync_done(result,interactive))
+            except Exception as ex:
+                text=str(ex)
+                self.after(0,lambda:self._sync_failed(text,interactive))
+        threading.Thread(target=run,daemon=True).start()
+
+    def _sync_done(self,result,interactive):
+        self._sync_running=False
+        self.google_courses=result["courses"]
+        self.state["course_ids"]=result["mapped"]
+        self.state["classroom_order"]=[c["name"] for c in result["courses"]]
+        self.remote_classroom_entries.update(result["entries"])
+        try:save_state(self.state)
+        except Exception:pass
+        self.update_day()
+        records=sum(len(v) for v in result["entries"].values())
+        text=(f"Classroom синхронізовано: курсів — {len(result['courses'])}, "
+              f"записів — {records}.")
+        if result["unmapped"]:
+            text+=f" Не зіставлено з Classroom: {len(result['unmapped'])} (кнопка «Зіставити курси»)."
+        if result["errors"]:
+            text+=f" Не вдалося прочитати курсів: {len(result['errors'])}."
+        self.foot.config(text=text)
+        if interactive and (result["errors"] or result["unmapped"]):
+            messagebox.showinfo("Google Classroom",text+("\n\n"+"\n".join(result["errors"][:5]) if result["errors"] else ""))
+
+    def _sync_failed(self,error,interactive):
+        self._sync_running=False
+        self.foot.config(text="Синхронізація з Classroom не вдалася (дані на екрані — з останнього разу).")
+        if interactive:
+            messagebox.showerror("Google Classroom",error+"\n\nПеревірте інтернет і налаштування Google (ПОЧАТКОВЕ НАЛАШТУВАННЯ).")
+
+    def edit_lesson_in_ktp(self):
+        lesson=self.selected()
+        if not lesson:return
+        from .editor_ui import SchoolEditor
+        editor=SchoolEditor(self,self.update_day)
+        editor.focus_lesson(lesson.stream,lesson.lesson_number)
+
+    def samples_dialog(self):
+        from .samples_ui import show_samples
+        show_samples(self)
+
+    def data_dialog(self):
+        from .samples_ui import show_data_folder
+        show_data_folder(self)
+
     def get_courses(self):
         def task():
             from .google_client import list_teacher_courses
@@ -1108,7 +1227,7 @@ class MainApp(WindowBase):
         if not self.google_courses:
             messagebox.showinfo("Курси","Спочатку натисніть «Підключити Google / одержати курси».");return
         dialog=tk.Toplevel(self);dialog.title("Зіставлення місцевих потоків і Google Classroom")
-        maximize_work_window(dialog)
+        fit_work_window(dialog,"normal")
         ttk.Label(dialog,text="Кожен потік або об'єднаний курс зіставте з курсом Google. Порожній рядок не публікується.").pack(anchor="w",padx=12,pady=10)
         wrap=ttk.Frame(dialog);wrap.pack(fill="both",expand=True)
         canvas=tk.Canvas(wrap)

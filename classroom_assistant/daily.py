@@ -15,7 +15,7 @@ def prepare(day, with_ai=False):
         if with_ai:
             from .ai_writer import generate_full_lesson
             material=generate_full_lesson(lesson,read_json("Налаштування.json").get("ai_model","gpt-5"))
-        name=safe_name(lesson)
+        name=f"{lesson.stream} — {safe_name(lesson)}"
         output_file=create_word(lesson,output/name,material)
         (output/f"{output_file.stem} Classroom.txt").write_text(html_classroom_text(lesson),encoding="utf-8")
         output_log.append(f"{lesson.period}-й урок | {lesson.stream} | КТП №{lesson.lesson_number} | {lesson.topic}")

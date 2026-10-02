@@ -73,7 +73,13 @@ def resolve_stream(raw,stream_names,base="",aliases=None):
     alias=(aliases or {}).get(_normalize(raw))
     if alias in stream_names:return alias
     exact=[s for s in stream_names if _normalize(s)==_normalize(raw)]
-    return exact[0] if len(exact)==1 else ("? "+raw)
+    if len(exact)==1:return exact[0]
+    # «5-Г ІУ» у вашому файлі, а в програмі єдиний потік класу — «5-Г історія».
+    head=_normalize(raw).split()[0] if raw.split() else ""
+    if re.match(r'^\d{1,2}-[а-яіїєґa-z]$',head):
+        same=[s for s in stream_names if _normalize(s).split()[:1]==[head]]
+        if len(same)==1:return same[0]
+    return "? "+raw
 
 def parse_cell(value,known_streams,aliases=None):
     text=tidy(value).replace('\n',' ')

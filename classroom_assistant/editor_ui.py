@@ -10,7 +10,7 @@ from .editor_core import (deep_copy_data, guess_columns, extract_lessons,
     docx_table_rows, csv_rows, persist, validate_working, tidy,
     import_source_dates, source_date_for_stream, parse_source_dates, import_notes)
 from .engine import ROOT, save_state, build_calendar
-from .window_ui import maximize_work_window
+from .window_ui import fit_work_window
 try:
     from tkinterdnd2 import DND_FILES
 except ImportError:
@@ -70,7 +70,7 @@ def api_key_dialog(parent):
     """Окремий діалог замість simpledialog.askstring(show='*') із кнопкою вставлення."""
     window=tk.Toplevel(parent)
     window.title("OpenAI API — безпечне введення")
-    maximize_work_window(window)
+    fit_work_window(window,"small")
     window.resizable(False,False)
     window.transient(parent)
     window.grab_set()
@@ -117,7 +117,7 @@ class ImportPreview(tk.Toplevel):
     def __init__(self,parent,path,on_accept):
         super().__init__(parent)
         self.title("Попередній перегляд імпорту КТП")
-        maximize_work_window(self)
+        fit_work_window(self,"large")
         self.transient(parent);self.grab_set()
         self.path=Path(path);self.on_accept=on_accept
         self._excluded_indices=set()
@@ -236,14 +236,17 @@ class SchoolEditor(tk.Toplevel):
     def __init__(self,parent,on_saved):
         super().__init__(parent)
         self.title("КЕРУВАННЯ НАВЧАЛЬНИМ РОКОМ • редагування КТП і розкладу")
-        maximize_work_window(self)
-        self.minsize(960,680)
+        fit_work_window(self,"normal")
         self.transient(parent)
         self.cfg,self.plans=deep_copy_data()
         self.original_cfg,self.original_plans=copy.deepcopy(self.cfg),copy.deepcopy(self.plans)
         self.on_saved=on_saved
         self.parent=parent
         self.current_plan=None;self.lesson_row=None
+        self.current_entry=None;self.list_entries=[];self.plan_keys=[]
+        self._active_inline=None
+        self.escape_closes=True;self.handles_save=True
+        self.bind("<<SaveAll>>",lambda _:self.save())
         outer=ttk.Frame(self,padding=8);outer.pack(fill="both",expand=True)
         ttk.Label(outer,text="Редагуйте та перевіряйте локально. До Google нічого не надсилається.",
                   foreground="#245471").pack(anchor="w")
@@ -261,8 +264,12 @@ class SchoolEditor(tk.Toplevel):
         ttk.Button(buttons,text="ЗБЕРЕГТИ ВСІ ЗМІНИ (з резервною копією)",command=self.save).pack(side="left")
         ttk.Button(buttons,text="Відкрити папку резервних копій",
                    command=self.open_backup).pack(side="left",padx=12)
-        ttk.Button(buttons,text="Скасувати / закрити",command=self.close).pack(side="right")
+        ttk.Button(buttons,text="Закрити",command=self.close).pack(side="right")
         self.protocol("WM_DELETE_WINDOW",self.close)
+        # Побудова вкладок сама оновлює похідні поля (напр. список курсів):
+        # запам'ятати стан ПІСЛЯ цього, щоб «незбережені зміни» означали лише ваші правки.
+        self.original_cfg=copy.deepcopy(self.cfg)
+        self.original_plans=copy.deepcopy(self.plans)
 
     def _setup_file_drop_targets(self):
         """Windows drag-and-drop на КТП/розклад/курси з підсвічуванням."""
@@ -339,8 +346,7 @@ class SchoolEditor(tk.Toplevel):
                                     parent=self)
                 return "copy"
             if kind=="planlist":
-                if item is not None and 0<=item<len(self.plan_keys):
-                    key=self.plan_keys[item]
+                if item is not None and 0<=item<len(self.list_entries):
                     self.planlist.selection_clear(0,"end")
                     self.planlist.selection_set(item)
                     self.plan_selected()
@@ -350,15 +356,14 @@ class SchoolEditor(tk.Toplevel):
             elif kind=="stream" and item:
                 values=widget.item(item,"values")
                 name=values[0] if values else None
-                plan=self.cfg["course_map"].get(name,{}).get("plan")
-                if plan and plan in self.plan_keys:
+                course=self.cfg["course_map"].get(name,{}).get("course_title")
+                ix=next((i for i,e in enumerate(self.list_entries)
+                         if e.get("course")==course),None)
+                if ix is not None:
                     self.notebook.select(self.tab_plans)
-                    ix=self.plan_keys.index(plan)
                     self.planlist.selection_clear(0,"end")
                     self.planlist.selection_set(ix)
                     self.plan_selected()
-                    self.ktp_dates_stream.set(name)
-                    self.refresh_lessons()
             self.import_plan(path=path)
         elif kind=="schedule":
             if path.suffix.lower() not in (".docx",".doc",".xlsx",".csv"):
@@ -376,16 +381,38 @@ class SchoolEditor(tk.Toplevel):
         else:
             messagebox.showinfo("Резервні копії",str(folder),parent=self)
 
+    def _is_dirty(self):
+        if self.cfg!=self.original_cfg or self.plans!=self.original_plans:return True
+        try:values=self._year_values()
+        except Exception:return False
+        if any(self.cfg.get(k)!=v for k,v in values.items()):return True
+        return (self.teacher_var.get().strip()!=str(self.cfg.get("workload_teacher","")).strip()
+                or self.code_var.get().strip()!=str(self.cfg.get("workload_code","")).strip())
+
     def close(self):
-        if (self.cfg!=self.original_cfg or self.plans!=self.original_plans) and not messagebox.askyesno(
-                "Незбережені зміни","Закрити й відкинути всі незбережені правки?",parent=self):return
-        self.destroy()
+        if self._is_dirty():
+            answer=messagebox.askyesnocancel("Зберегти зміни?",
+                "У редакторі є незбережені зміни.\n\nЗберегти їх перед закриттям?\n\n"
+                "«Так» — зберегти (буде створено резервну копію)\n"
+                "«Ні» — закрити без збереження\n«Скасувати» — повернутися",parent=self)
+            if answer is None:return
+            if answer and not self.save(confirm=False):return
+        try:self.destroy()
+        except tk.TclError:pass
 
     def _plans_ui(self):
         tab=self.tab_plans
         left=ttk.Frame(tab,padding=6);left.pack(side="left",fill="y")
-        ttk.Label(left,text="Оберіть КТП (15 початкових планів)").pack(anchor="w")
-        self.planlist=tk.Listbox(left,width=29,exportselection=False,height=22)
+        ttk.Label(left,text="Класи з вашого Classroom",
+                  font=("Segoe UI",10,"bold")).pack(anchor="w")
+        ttk.Label(left,foreground="#365777",wraplength=250,justify="left",
+                  text=("Порядок як у Classroom. Перетягніть файл КТП на клас — "
+                        "клас підсвітиться." if DND_FILES else
+                        "Порядок як у Classroom. Для КТП натисніть «Імпортувати».")
+                  ).pack(anchor="w",pady=(0,4))
+        self.planlist=tk.Listbox(left,width=31,exportselection=False,height=16,
+                                 activestyle="none",selectbackground="#2E7BC4",
+                                 selectforeground="white")
         self.planlist.pack(fill="y",expand=True)
         self.planlist.bind("<<ListboxSelect>>",self.plan_selected)
         self.planlist.bind("<Button-3>",self._plan_context_menu)
@@ -395,9 +422,10 @@ class SchoolEditor(tk.Toplevel):
         ttk.Button(left,text="Імпортувати DOCX / DOC / CSV",command=self.import_plan).pack(fill="x",pady=4)
         ttk.Button(left,text="Позначити план перевіреним",command=self.approve_plan).pack(fill="x",pady=4)
         right=ttk.Frame(tab,padding=6);right.pack(side="left",fill="both",expand=True)
-        self.plan_name=ttk.Label(right,text="Виберіть план",font=("Segoe UI",11,"bold"))
+        self.plan_name=ttk.Label(right,text="Виберіть план",font=("Segoe UI",11,"bold"),
+                                 wraplength=800)
         self.plan_name.pack(anchor="w")
-        self.plan_count=ttk.Label(right,text="")
+        self.plan_count=ttk.Label(right,text="",wraplength=800,justify="left")
         self.plan_count.pack(anchor="w")
         datebar=ttk.Frame(right);datebar.pack(fill="x",pady=(2,3))
         ttk.Label(datebar,text="Дати уроків для класу:").pack(side="left",padx=(0,6))
@@ -405,14 +433,13 @@ class SchoolEditor(tk.Toplevel):
         self.ktp_dates_combo=ttk.Combobox(datebar,textvariable=self.ktp_dates_stream,
                                               state="readonly",width=25)
         self.ktp_dates_combo.pack(side="left")
-        self.ktp_dates_combo.bind("<<ComboboxSelected>>",
-                                  lambda _:self.refresh_lessons(self.lesson_row))
-        ttk.Label(datebar,text="Дати розраховано за розкладом і канікулами; "
-                       "для іншого класу виберіть його вище.",
+        self.ktp_dates_combo.bind("<<ComboboxSelected>>",self._stream_combo_changed)
+        ttk.Label(datebar,text="Дати — за розкладом і канікулами; для іншого класу "
+                       "виберіть його тут.",wraplength=330,justify="left",
                   foreground="#365777").pack(side="left",padx=9)
         frame=ttk.Frame(right);frame.pack(fill="both",expand=True,pady=6)
         self.lessons=ttk.Treeview(frame,columns=("num","date","topic","hw"),
-                                   show="headings",height=14,selectmode="extended")
+                                   show="headings",height=10,selectmode="extended")
         for col,title,width in (("num","№",40),("date","Дата",96),
                                  ("topic","Тема",455),("hw","Домашнє завдання",285)):
             self.lessons.heading(col,text=title);self.lessons.column(col,width=width)
@@ -511,29 +538,127 @@ class SchoolEditor(tk.Toplevel):
             self._refresh_planlist()
         return "break"
 
-    def _refresh_planlist(self,chosen=None):
-        keys=list(self.plans)
+    def _classroom_course_titles(self):
+        """Назви курсів у порядку Classroom; далі — власні, яких там не знайдено."""
+        google=[str(c.get("name","")).strip()
+                for c in (getattr(self.parent,"google_courses",None) or []) if c.get("name")]
+        saved=[x for x in self.parent.state.get("classroom_order",[]) if isinstance(x,str)]
+        configured=sorted({info.get("course_title","")
+                           for info in self.cfg["course_map"].values()
+                           if info.get("course_title")})
+        ordered=list(dict.fromkeys(google or saved))
+        ordered+=[t for t in configured if t not in ordered]
+        return ordered
+
+    def _build_list_entries(self):
+        entries=[];used=set()
+        for title in self._classroom_course_titles():
+            streams=sorted(s for s,info in self.cfg["course_map"].items()
+                           if info.get("course_title")==title)
+            plans=[self.cfg["course_map"][s]["plan"] for s in streams]
+            used.update(plans)
+            plan=plans[0] if plans and plans[0] in self.plans else None
+            entries.append({"kind":"course","course":title,"streams":streams,"plan":plan,
+                            "label":title if plan else title+"   — без КТП"})
+        for key in self.plans:
+            if key not in used:
+                entries.append({"kind":"plan","course":None,"streams":[],"plan":key,
+                                "label":"КТП "+friendly_plan_id(key)+"   — без класу"})
+        return entries
+
+    def _refresh_planlist(self,chosen=None,course=None):
+        previous=(self.current_entry or {}).get("course")
+        self.list_entries=self._build_list_entries()
+        self.plan_keys=[e.get("plan") for e in self.list_entries]
         self.planlist.delete(0,"end")
-        self.plan_keys=keys
-        for key in keys:self.planlist.insert("end",friendly_plan_id(key))
-        if keys:
-            k=chosen if chosen in keys else (self.current_plan if self.current_plan in keys else keys[0])
-            self.planlist.selection_set(keys.index(k));self.plan_selected()
-        else:self.current_plan=None
+        for index,entry in enumerate(self.list_entries):
+            self.planlist.insert("end",entry["label"])
+            if not entry["plan"] or entry["kind"]=="plan":
+                self.planlist.itemconfigure(index,foreground="#7A8794")
+        if not self.list_entries:
+            self.current_plan=None;self.current_entry=None;return
+        def find(test):
+            return next((i for i,e in enumerate(self.list_entries) if test(e)),None)
+        pick=None
+        if course:pick=find(lambda e:e["course"]==course)
+        if pick is None and chosen:pick=find(lambda e:e["plan"]==chosen)
+        if pick is None and previous:pick=find(lambda e:e["course"]==previous)
+        if pick is None and self.current_plan:pick=find(lambda e:e["plan"]==self.current_plan)
+        pick=0 if pick is None else pick
+        self.planlist.selection_clear(0,"end");self.planlist.selection_set(pick)
+        self.planlist.see(pick)
+        self.plan_selected()
 
     def plan_selected(self,_event=None):
         indexes=self.planlist.curselection()
         if not indexes:return
-        self.current_plan=self.plan_keys[indexes[0]]
-        self.refresh_lessons()
+        entry=self.list_entries[indexes[0]]
+        self.current_entry=entry
+        self.current_plan=entry.get("plan")
+        if entry.get("streams"):
+            self.ktp_dates_stream.set(entry["streams"][0])
+        if self.current_plan:
+            self.refresh_lessons()
+            sharing=sorted(s for s,i in self.cfg["course_map"].items()
+                           if i.get("plan")==self.current_plan)
+            if len(sharing)>1:
+                self.plan_count.config(text=self.plan_count.cget("text")
+                    +f"  КТП спільний для: {', '.join(sharing)}.")
+        else:
+            self._show_empty_entry(entry)
+
+    def _show_empty_entry(self,entry):
+        for item in self.lessons.get_children():self.lessons.delete(item)
+        self.lesson_row=None
+        for field in (self.topictext,self.hwtext):field.delete("1.0","end")
+        self.ktp_dates_combo.configure(values=[])
+        name=entry.get("course") or "клас"
+        self.plan_name.config(text=f"{name}: КТП ще не підключено")
+        self.plan_count.config(text=("Перетягніть сюди файл КТП (DOCX, DOC, CSV) — програма "
+            "створить для цього класу план. Або натисніть «Імпортувати DOCX / DOC / CSV»."))
+
+    def focus_lesson(self,stream,number):
+        """Відкрити КТП клітинки з головного вікна: клас → план → рядок уроку."""
+        course=self.cfg["course_map"].get(stream,{}).get("course_title")
+        ix=next((i for i,e in enumerate(self.list_entries) if e.get("course")==course),None)
+        if ix is None:return
+        self.notebook.select(self.tab_plans)
+        self.planlist.selection_clear(0,"end");self.planlist.selection_set(ix)
+        self.planlist.see(ix)
+        self.plan_selected()
+        self.ktp_dates_stream.set(stream)
+        self.refresh_lessons(max(0,int(number)-1))
+
+    def _stream_combo_changed(self,_event=None):
+        self._sync_plan_with_stream()
+        self.refresh_lessons(self.lesson_row)
+
+    def _sync_plan_with_stream(self):
+        shared=(self.current_entry or {}).get("streams") or []
+        stream=self.ktp_dates_stream.get()
+        if stream in shared:
+            plan=self.cfg["course_map"].get(stream,{}).get("plan")
+            if plan in self.plans:self.current_plan=plan
+
+    def _create_plan_for_course(self,course):
+        base=re.sub(r"\s+","_",course.strip()) or "Новий_клас"
+        key=base;number=2
+        while key in self.plans:
+            key=f"{base}_{number}";number+=1
+        self.cfg["course_map"][course]={"plan":key,"course_title":course}
+        return key
 
     def refresh_lessons(self,selected=None):
         if not self.current_plan:return
+        self._sync_plan_with_stream()
         doc=self.plans[self.current_plan]
         entries=doc["lessons"]
-        streams=[name for name,info in self.cfg["course_map"].items()
-                 if info.get("plan")==self.current_plan]
-        streams.sort()
+        streams=sorted(name for name,info in self.cfg["course_map"].items()
+                       if info.get("plan")==self.current_plan)
+        shared=sorted((self.current_entry or {}).get("streams") or [])
+        if len({self.cfg["course_map"][x]["plan"] for x in shared
+                if x in self.cfg["course_map"]})>1:
+            streams=shared      # об'єднаний курс (напр. Право + ГО)
         current=self.ktp_dates_stream.get()
         self.ktp_dates_combo.configure(values=streams)
         if current not in streams:
@@ -651,18 +776,25 @@ class SchoolEditor(tk.Toplevel):
             self.refresh_lessons()
 
     def import_plan(self,path=None):
-        if not self.current_plan:
-            messagebox.showwarning("КТП","Спочатку створіть або виберіть план.",parent=self);return
-        path=filedialog.askopenfilename(parent=self,title="Новий календарний план",
+        entry=self.current_entry or {}
+        if not self.current_plan and not entry.get("course"):
+            messagebox.showwarning("КТП","Спочатку виберіть клас у списку зліва.",parent=self);return
+        if path is None:
+            path=filedialog.askopenfilename(parent=self,title="Новий календарний план",
                     filetypes=[("Календарні плани Word/CSV","*.docx *.doc *.csv"),("Word DOCX","*.docx"),("Word DOC (через Word)","*.doc"),("CSV","*.csv")])
         if not path:return
         if Path(path).suffix.lower() not in (".docx",".doc",".csv"):
             messagebox.showerror("Формат","Підтримуються DOCX, DOC (через Word) та CSV.",parent=self);return
         target=self.current_plan
+        course=entry.get("course")
         def accept(entries,filename):
-            self.plans[target]={"filename":filename,"lessons":entries,"needs_review":False}
-            self.current_plan=target
-            self.refresh_lessons()
+            plan=target
+            if not plan:
+                plan=self._create_plan_for_course(course)
+                self.refresh_streams()
+            self.plans[plan]={"filename":filename,"lessons":entries,"needs_review":False}
+            self.current_plan=plan
+            self._refresh_planlist(chosen=plan,course=course)
         try:ImportPreview(self,path,accept)
         except Exception as ex:messagebox.showerror("КТП не розпізнано",str(ex),parent=self)
 
@@ -688,12 +820,23 @@ class SchoolEditor(tk.Toplevel):
         self.slots.bind("<Button-3>",self._schedule_context_menu)
         controls=ttk.Frame(tab);controls.pack(fill="x",pady=5)
         ttk.Button(controls,text="Змінити вибраний урок",command=self.edit_slot).pack(side="left",padx=3)
-        ttk.Button(controls,text="Імпортувати розклад DOCX/CSV/XLSX",command=self.import_schedule).pack(side="left",padx=3)
-        ttk.Button(controls,text="Згенерувати Word-розклад",command=self.export_schedule).pack(side="left",padx=3)
-        ttk.Button(controls,text="Згенерувати JPEG-розклад",command=self.export_schedule_jpeg).pack(side="left",padx=3)
+        ttk.Button(controls,text="Завантажити навантаження / розклад",command=self.import_schedule).pack(side="left",padx=3)
+        ttk.Button(controls,text="Згенерувати Word «Навантаження»",command=self.export_workload_word).pack(side="left",padx=3)
+        ttk.Button(controls,text="Згенерувати JPEG «Навантаження»",command=self.export_workload_picture).pack(side="left",padx=3)
+        ttk.Label(tab,foreground="#365777",text=("Можна перетягнути файл розкладу (Word, Excel, CSV) прямо "
+                  "на таблицю вище — він підсвітиться, і програма сама все прочитає."
+                  if DND_FILES else "Файл розкладу (Word, Excel, CSV) завантажується кнопкою вище.")
+                  ).pack(anchor="w")
+        head=ttk.Frame(tab);head.pack(fill="x",pady=(6,0))
+        self.teacher_var=tk.StringVar(value=str(self.cfg.get("workload_teacher","")))
+        self.code_var=tk.StringVar(value=str(self.cfg.get("workload_code","")))
+        ttk.Label(head,text="У заголовку навантаження — прізвище та ініціали:").pack(side="left")
+        ttk.Entry(head,textvariable=self.teacher_var,width=22).pack(side="left",padx=(4,14))
+        ttk.Label(head,text="код / примітка:").pack(side="left")
+        ttk.Entry(head,textvariable=self.code_var,width=14).pack(side="left",padx=4)
         opts=ttk.Frame(tab);opts.pack(fill="x",pady=5)
-        self.show_bells=tk.BooleanVar(value=self.cfg.get("print_bells",False))
-        self.show_meal=tk.BooleanVar(value=self.cfg.get("print_meal",False))
+        self.show_bells=tk.BooleanVar(value=self.cfg.get("print_bells",True))
+        self.show_meal=tk.BooleanVar(value=self.cfg.get("print_meal",True))
         self.show_numbers=tk.BooleanVar(value=self.cfg.get("print_numbers",True))
         for txt,var in [("Показувати дзвоники",self.show_bells),
                         ("Рядок харчування",self.show_meal),
@@ -766,7 +909,7 @@ class SchoolEditor(tk.Toplevel):
             messagebox.showinfo("Розклад","Виберіть рядок уроку.",parent=self);return
         day=str(self.dayselect.current());idx=int(choice[0])
         win=tk.Toplevel(self);win.title(f"Урок №{idx+1} • {self.dayselect.get()}")
-        win.transient(self);maximize_work_window(win);win.grab_set()
+        win.transient(self);fit_work_window(win,"small");win.grab_set()
         old=self.cfg["days"][day][idx]
         options=["— немає —"]+sorted(self.cfg["course_map"])
         values=[]
@@ -846,8 +989,14 @@ class SchoolEditor(tk.Toplevel):
                 [item.get("name","") for item in getattr(self.parent,"google_courses",[])]))
             current_value=current_info.get("course_title","")
         x,y,width,height=bbox
+        existing=self._active_inline
+        if existing is not None:
+            try:
+                if existing.winfo_exists():return
+            except tk.TclError:pass
         editor=ttk.Combobox(self.streamtree,values=options,
                             state="readonly" if is_plan else "normal")
+        self._active_inline=editor
         editor.set(current_value)
         editor.place(x=x,y=y,width=width,height=height)
         editor.focus_set()
@@ -862,6 +1011,7 @@ class SchoolEditor(tk.Toplevel):
             if closed[0]:return
             closed[0]=True
             new=editor.get().strip()
+            self._active_inline=None
             editor.destroy()
             if not save or not new:return
             if is_plan:
@@ -873,9 +1023,23 @@ class SchoolEditor(tk.Toplevel):
                 self.cfg["course_map"][current]["course_title"]=new
             self.refresh_streams()
             self.streamtree.selection_set(item)
+        def focus_inside():
+            # Відкритий список (popdown) забирає фокус: це не «втрата фокусу».
+            try:
+                current=str(editor.tk.call("focus"))
+                popdown=str(editor.tk.call("ttk::combobox::PopdownWindow",editor))
+            except tk.TclError:return False
+            return current==str(editor) or current.startswith(popdown)
+        def focus_left(_event):
+            def check():
+                if closed[0]:return
+                try:alive=editor.winfo_exists()
+                except tk.TclError:alive=False
+                if alive and not focus_inside():finish(True)
+            self.after(220,check)
         editor.bind("<Return>",lambda _:finish(True))
-        editor.bind("<Escape>",lambda _:finish(False))
-        editor.bind("<FocusOut>",lambda _:finish(True))
+        editor.bind("<Escape>",lambda _:(finish(False),"break")[1])
+        editor.bind("<FocusOut>",focus_left)
         editor.bind("<<ComboboxSelected>>",lambda _:finish(True))
 
     def edit_stream(self,new):
@@ -885,7 +1049,7 @@ class SchoolEditor(tk.Toplevel):
             if not ids:return
             current=self.streamtree.item(ids[0],"values")[0]
         dlg=tk.Toplevel(self);dlg.title("Клас / предмет / курс Classroom")
-        dlg.transient(self);maximize_work_window(dlg);dlg.grab_set()
+        dlg.transient(self);fit_work_window(dlg,"small");dlg.grab_set()
         info=self.cfg["course_map"].get(current,{})
         fields=[]
         for label,start in (("Потік за розкладом",current or ""),
@@ -1046,19 +1210,21 @@ class SchoolEditor(tk.Toplevel):
             if self.cfg["days"].get(str(day)):self.cfg["days"][str(day)].pop()
         self.refresh_time_fields();self.refresh_slots()
 
-    def import_schedule(self):
+    def import_schedule(self,path=None):
         from .schedule_io import table_rows,decode_schedule
-        path=filedialog.askopenfilename(parent=self,title="Імпортувати розклад",
-             filetypes=[("Таблиці","*.docx *.doc *.csv *.xlsx"),
-                        ("Word","*.docx *.doc"),("Excel","*.xlsx"),("CSV","*.csv")])
+        if path is None:
+            path=filedialog.askopenfilename(parent=self,title="Імпортувати розклад",
+                 filetypes=[("Таблиці","*.docx *.doc *.csv *.xlsx"),
+                            ("Word","*.docx *.doc"),("Excel","*.xlsx"),("CSV","*.csv")])
         if not path:return
         try:
-            schedule,unknown,found=decode_schedule(table_rows(path),self.cfg)
+            rows_cache=table_rows(path)
+            schedule,unknown,found=decode_schedule(rows_cache,self.cfg)
         except Exception as e:
             messagebox.showerror("Не вдалося імпортувати",str(e),parent=self);return
         if unknown:
             from .schedule_io import _normalize
-            dlg=tk.Toplevel(self);dlg.title("Зіставте назви предметів у файлі");maximize_work_window(dlg)
+            dlg=tk.Toplevel(self);dlg.title("Зіставте назви предметів у файлі");fit_work_window(dlg,"normal")
             dlg.transient(self);dlg.grab_set()
             ttk.Label(dlg,text="У розкладі є назви, яких немає в поточних потоках. Оберіть правильні відповідники:",
                       wraplength=800).pack(anchor="w",padx=12,pady=9)
@@ -1088,7 +1254,7 @@ class SchoolEditor(tk.Toplevel):
             ttk.Button(dlg,text="Зберегти відповідності",command=apply).pack(side="bottom",pady=9)
             self.wait_window(dlg)
             if not chosen["ok"]:return
-            schedule,unknown,found=decode_schedule(table_rows(path),self.cfg)
+            schedule,unknown,found=decode_schedule(rows_cache,self.cfg)
             if unknown:
                 messagebox.showerror("Зіставлення","Залишилися невідомі назви:\n"+"\n".join(unknown),parent=self);return
         if messagebox.askyesno("Перегляд імпорту",
@@ -1096,8 +1262,52 @@ class SchoolEditor(tk.Toplevel):
             "ЗАМІНИТИ всі 5 днів розкладу на нову таблицю?\n"
             "Зміни поки будуть лише в редакторі до натискання «ЗБЕРЕГТИ ВСІ ЗМІНИ».",parent=self):
             self.cfg["days"]=schedule
+            from .workload_io import parse_workload_title
+            info=parse_workload_title(rows_cache)
+            if info.get("workload_teacher"):self.teacher_var.set(info["workload_teacher"])
+            if info.get("workload_code"):self.code_var.set(info["workload_code"])
             self.refresh_slots()
-            messagebox.showinfo("Імпорт","Розклад у редакторі оновлено. Перегляньте всі дні.",parent=self)
+            messagebox.showinfo("Імпорт","Розклад у редакторі оновлено. Перегляньте всі дні.\n"
+                "Не забудьте натиснути «ЗБЕРЕГТИ ВСІ ЗМІНИ».",parent=self)
+
+    def _workload_config(self):
+        self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
+        self.cfg["meal_break_after"]=int(self.meal_after.get())
+        self.cfg["meal_label"]=self.meal_label.get().strip() or "ХАРЧУВАННЯ У ЇДАЛЬНІ"
+        config=copy.deepcopy(self.cfg)
+        config["workload_teacher"]=self.teacher_var.get().strip()
+        config["workload_code"]=self.code_var.get().strip()
+        return config
+
+    def export_workload_word(self):
+        from .workload_io import export_workload_docx
+        year=f"{self.cfg['year_start'][:4]}-{self.cfg['year_end'][:4]}"
+        path=filedialog.asksaveasfilename(parent=self,title="Зберегти «Навантаження» у Word",
+             defaultextension=".docx",initialfile=f"Навантаження_{year}.docx",
+             filetypes=[("Word DOCX","*.docx")])
+        if not path:return
+        try:
+            export_workload_docx(self._workload_config(),path,
+                show_numbers=self.show_numbers.get(),show_times=self.show_bells.get(),
+                show_meal=self.show_meal.get())
+            messagebox.showinfo("Навантаження",f"Готово. Файл Word:\n{path}",parent=self)
+        except Exception as ex:
+            messagebox.showerror("Word",str(ex),parent=self)
+
+    def export_workload_picture(self):
+        from .workload_io import export_workload_jpeg
+        year=f"{self.cfg['year_start'][:4]}-{self.cfg['year_end'][:4]}"
+        path=filedialog.asksaveasfilename(parent=self,title="Зберегти «Навантаження» як зображення",
+             defaultextension=".jpg",initialfile=f"Навантаження_{year}.jpg",
+             filetypes=[("Зображення JPEG","*.jpg *.jpeg")])
+        if not path:return
+        try:
+            export_workload_jpeg(self._workload_config(),path,
+                show_numbers=self.show_numbers.get(),show_times=self.show_bells.get(),
+                show_meal=self.show_meal.get())
+            messagebox.showinfo("Навантаження",f"Готово. Зображення:\n{path}",parent=self)
+        except Exception as ex:
+            messagebox.showerror("JPEG",str(ex),parent=self)
 
     def export_schedule(self):
         from .schedule_io import export_schedule_docx
@@ -1281,7 +1491,7 @@ class SchoolEditor(tk.Toplevel):
             self.refresh_holidays()
         return "break"
 
-    def save(self):
+    def save(self,confirm=True):
         # Зберігайте ISO всередині програми, а ДД.ММ.РРРР — тільки в інтерфейсі.
         try:self.cfg.update(self._year_values())
         except ValueError as ex:
@@ -1296,6 +1506,8 @@ class SchoolEditor(tk.Toplevel):
         self.cfg["print_bells"]=self.show_bells.get()
         self.cfg["print_meal"]=self.show_meal.get()
         self.cfg["print_numbers"]=self.show_numbers.get()
+        self.cfg["workload_teacher"]=self.teacher_var.get().strip()
+        self.cfg["workload_code"]=self.code_var.get().strip()
         errors=validate_working(self.cfg,self.plans)
         # Unconfirmed new year can be saved so that teacher has an editable draft; blank plans are still marked.
         errors=[e for e in errors if not (e.startswith("Порожній КТП") and
@@ -1303,7 +1515,8 @@ class SchoolEditor(tk.Toplevel):
         if errors:
             messagebox.showerror("Помилки у даних","Виправте перед збереженням:\n"+"\n".join(errors[:20]),parent=self);return
         if self.cfg==self.original_cfg and self.plans==self.original_plans:
-            messagebox.showinfo("Дані","Змін немає.",parent=self);return
+            if confirm:messagebox.showinfo("Дані","Змін немає.",parent=self)
+            return True
         reset=bool(getattr(self,"_is_new_year",False))
         educational_changes=(
             self.cfg.get("days")!=self.original_cfg.get("days")
@@ -1321,7 +1534,7 @@ class SchoolEditor(tk.Toplevel):
             message+="\\nРаніше перевірені Word будуть позначені як такі, що потребують повторної перевірки."
         if reset:
             message+="\\nНовий навчальний рік: зіставлення Google-курсів буде очищено."
-        if not messagebox.askyesno("Збереження",message,parent=self):return
+        if confirm and not messagebox.askyesno("Збереження",message,parent=self):return
         state=self.parent.state
         try:
             backup=persist(self.cfg,self.plans,state,"Редагування КТП і розкладу у програмі")
@@ -1344,4 +1557,6 @@ class SchoolEditor(tk.Toplevel):
         messagebox.showinfo("Збережено",
             "Усі зміни збережено локально.\nРезервна копія:\n"+str(backup)+
             "\n\nВсі матеріали Google Classroom залишилися без змін.",parent=self)
-        self.destroy()
+        try:self.destroy()
+        except tk.TclError:pass
+        return True

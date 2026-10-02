@@ -26,3 +26,38 @@ def maximize_work_window(window):
         except tk.TclError:pass
     window.after_idle(apply)
     return window
+
+
+# Розмір вікон-діалогів: частка екрана, мінімум (ширина, висота).
+SIZE_PRESETS={"small":(0.46,0.58,720,500),
+              "normal":(0.64,0.76,980,660),
+              "large":(0.82,0.86,1100,700)}
+
+
+def fit_work_window(window,kind="normal",minimum=None):
+    """Зручне вікно: не на весь екран, але й без обрізаного вмісту.
+
+    Розмір = частка екрана, але не менший за те, що просить вміст (reqsize),
+    і не більший за екран. Вікно по центру; мінімальний розмір не дає
+    стиснути його так, що кнопки зникнуть.
+    """
+    ratio_w,ratio_h,min_w,min_h=SIZE_PRESETS[kind]
+    if minimum:min_w,min_h=minimum
+
+    def apply():
+        try:
+            if not window.winfo_exists():return
+            window.update_idletasks()
+            sw,sh=window.winfo_screenwidth(),window.winfo_screenheight()
+            max_w,max_h=int(sw*0.96),int(sh*0.92)
+            floor_w,floor_h=min(min_w,max_w),min(min_h,max_h)
+            w=min(max(int(sw*ratio_w),window.winfo_reqwidth(),floor_w),max_w)
+            h=min(max(int(sh*ratio_h),window.winfo_reqheight(),floor_h),max_h)
+            x=max(0,(sw-w)//2)
+            y=max(0,(sh-h)//2-int(sh*0.02))
+            window.minsize(floor_w,floor_h)
+            window.geometry(f"{w}x{h}+{x}+{y}")
+        except tk.TclError:
+            pass
+    window.after_idle(apply)
+    return window

@@ -9,7 +9,7 @@ import tempfile
 from datetime import date
 from pathlib import Path
 from docx import Document
-from .engine import ROOT, build_calendar, safe_name
+from .engine import ROOT, build_calendar, safe_name, word_path
 
 LIBRARY_ROOT = ROOT / "Бібліотека уроків"
 INDEX = LIBRARY_ROOT / "Індекс.json"
@@ -142,18 +142,30 @@ def copy_for_lesson(master,lesson):
     """Окрема Word-копія для дати/ДЗ; оригінал не змінюється."""
     source=Path(master)
     check_real_docx(source)
-    output=ROOT/"Готові Word"/lesson.day/safe_name(lesson)
+    output=word_path(lesson)
     output.parent.mkdir(parents=True,exist_ok=True)
     doc=Document(source)
     date_ddmm=lesson.day[8:10]+"."+lesson.day[5:7]
     heading=f"Урок {date_ddmm} — {lesson.topic}"
     regular=re.compile(r"^Урок\s+\d{2}\.\d{2}(?:\.\d{4})?\s*[—–-]",re.I)
     found_title=False
+    date_full=lesson.day[8:10]+"."+lesson.day[5:7]+"."+lesson.day[:4]
+    info_strip=re.compile(r"^Урок\s*№\s*\d+\s*[•·|\-–—]",re.I)
     for p in doc.paragraphs[:7]:
         if regular.search(p.text.strip()):
             _change_text(p,heading)
             found_title=True
             break
+        if info_strip.search(p.text.strip()):
+            # Інформаційна смуга Word від ChatGPT: «Урок № 8 • 02.10.2026».
+            _change_text(p,f"Урок № {lesson.lesson_number} • {date_full}")
+            found_title=True
+            break
+    for section in doc.sections:
+        for part in (section.header,section.footer):
+            for p in part.paragraphs:
+                updated=re.sub(r"\d{2}\.\d{2}\.\d{4}",date_full,p.text)
+                if updated!=p.text:_change_text(p,updated)
     if not found_title:
         p=doc.paragraphs[0].insert_paragraph_before(heading) if doc.paragraphs else doc.add_paragraph(heading)
         p.style="Heading 1"

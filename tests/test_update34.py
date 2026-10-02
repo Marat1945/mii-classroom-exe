@@ -170,8 +170,8 @@ class ChatGPTBridgeTests(unittest.TestCase):
 
     def test_main_window_uses_chatgpt_buttons(self):
         gui = (ROOT / "classroom_assistant" / "gui.py").read_text("utf8")
-        self.assertIn('("Word: лекція через ChatGPT",self.chatgpt_word)', gui)
-        self.assertIn('("ВСІ Word за день (ChatGPT)",self.chatgpt_batch)', gui)
+        self.assertIn("✨ Word-лекція через мій ChatGPT", gui)
+        self.assertIn("✨ Лекції ГПТ на весь день", gui)
         self.assertIn("Лекція через мій ChatGPT…", gui)
         self.assertNotIn("налаштувань.\\\\n", gui)
 

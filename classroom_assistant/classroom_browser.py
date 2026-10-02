@@ -14,7 +14,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from .classroom_archive import compatible_classroom_title
-from .window_ui import maximize_work_window
+from .window_ui import fit_work_window
 
 
 class ClassroomViewer(tk.Toplevel):
@@ -22,7 +22,7 @@ class ClassroomViewer(tk.Toplevel):
         super().__init__(parent)
         self.parent=parent
         self.title("МІЙ CLASSROOM • Перегляд матеріалів і чернеток")
-        maximize_work_window(self)
+        fit_work_window(self,"large")
         self.minsize(850,620)
         self.records=[]
         self.visible=[]

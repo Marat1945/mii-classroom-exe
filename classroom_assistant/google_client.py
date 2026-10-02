@@ -114,12 +114,57 @@ def create_draft(course_id, title, description, docx_path=None, assignment=False
             "kind":"ASSIGNMENT" if assignment else "MATERIAL","state":"DRAFT"}
 
 
-def list_classroom_posts(course_id, include_announcements=False, max_per_kind=1000):
+def token_ready():
+    """Є збережений дозвіл Google: можна синхронізувати БЕЗ вікна входу."""
+    path=DATA/"google_token.json"
+    if not path.exists():return False
+    try:
+        import json
+        info=json.loads(path.read_text(encoding="utf8"))
+        granted=set(info.get("scopes",[]))
+        return granted.issuperset(SCOPES) and bool(info.get("refresh_token") or info.get("token"))
+    except (ValueError,OSError,TypeError):
+        return False
+
+
+def sync_everything(titles,known_ids,progress=None):
+    """Курси в порядку Classroom + усі наявні матеріали/завдання (чернетки й опубліковані).
+
+    Лише читання. Курси зіставляються за точною назвою; вручну зіставлені
+    курси не змінюються. Помилка одного курсу не зупиняє решту.
+    """
+    say=progress or (lambda text:None)
+    say("Синхронізація з Google Classroom: отримую курси…")
+    courses=list_teacher_courses()
+    valid={str(c["id"]) for c in courses}
+    by_name={}
+    for course in courses:
+        by_name.setdefault(course["name"].strip().casefold(),[]).append(course)
+    mapped={k:str(v) for k,v in known_ids.items() if str(v) in valid}
+    for title in titles:
+        if title in mapped:continue
+        found=by_name.get(title.strip().casefold(),[])
+        if len(found)==1:mapped[title]=str(found[0]["id"])
+    classroom,drive=services()
+    entries={};errors=[]
+    unique=list(dict.fromkeys(mapped.values()))
+    names={cid:t for t,cid in mapped.items()}
+    for number,cid in enumerate(unique,1):
+        say(f"Синхронізація з Classroom: {names.get(cid,cid)} ({number}/{len(unique)})…")
+        try:
+            entries[cid]=list_classroom_posts(cid,service=(classroom,drive))["items"]
+        except Exception as ex:
+            errors.append(f"{names.get(cid,cid)}: {ex}")
+    return {"courses":courses,"mapped":mapped,"entries":entries,"errors":errors,
+            "unmapped":[t for t in titles if t not in mapped]}
+
+
+def list_classroom_posts(course_id, include_announcements=False, max_per_kind=1000, service=None):
     """Одержує вже наявні матеріали, завдання й (за окремим дозволом) оголошення.
     Тільки GET; жодних змін, видалень чи публікацій. Включає чернетки вчителя.
     """
     from .classroom_archive import normalize_item, fetch_paged_items
-    classroom,_drive=services(with_announcements=include_announcements)
+    classroom,_drive=service or services(with_announcements=include_announcements)
     common=[
         ("Матеріал",classroom.courses().courseWorkMaterials(),
          "courseWorkMaterial","courseWorkMaterialStates"),

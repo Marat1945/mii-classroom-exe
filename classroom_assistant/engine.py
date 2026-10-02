@@ -155,11 +155,26 @@ def html_classroom_text(lesson:Lesson, asynchronous=True, video=True):
         "Бережіть себе!\n\n"
         f"Д/з: {lesson.homework or 'Не зазначено в календарному плані — уточнити у вчителя.'}")
 
+def lesson_base_name(lesson:Lesson,limit=120):
+    """«Урок № 8, 02.10.2026 Тема» — назва, що говорить сама за себе."""
+    date_text=f"{lesson.day[8:10]}.{lesson.day[5:7]}.{lesson.day[:4]}"
+    head=f"Урок № {lesson.lesson_number}, {date_text} "
+    topic=re.sub(r'[<>:"/\\|?*\u0000-\u001f]+',' ',lesson.topic)
+    topic=re.sub(r'\s+',' ',topic).strip(' .')
+    room=max(20,limit-len(head))
+    if len(topic)>room:
+        cut=topic[:room]
+        topic=(cut.rsplit(' ',1)[0] if ' ' in cut[20:] else cut).rstrip(' .,;:—-')
+    return (head+topic).strip(' .')
+
 def safe_name(lesson:Lesson):
-    raw=f"{lesson.stream} {lesson.topic}".replace('/',' ')
-    raw=re.sub(r'[<>:"\\|?*\u0000-\u001f]+',' ',raw)
-    raw=re.sub(r'\s+',' ',raw).strip(' .')
-    return raw[:160]+".docx"
+    return lesson_base_name(lesson)+".docx"
+
+def word_path(lesson:Lesson):
+    """Готові Word/<дата>/<потік>/Урок № …docx — потік у папці, щоб імена не збігалися."""
+    stream=re.sub(r'[<>:"/\\|?*\u0000-\u001f]+',' ',lesson.stream)
+    stream=re.sub(r'\s+',' ',stream).strip(' .') or "потік"
+    return ROOT/"Готові Word"/lesson.day/stream/safe_name(lesson)
 
 def read_state():
     path=DATA/"Стан.json"
