@@ -15,7 +15,8 @@ from .window_ui import fit_work_window
 from .material_library import stream_subject
 from .datepicker import DateField, pick_date
 from .history import History, describe_change
-from .course_match import assign_streams, best_match, link_streams, norm as match_norm, parse as match_parse
+from .course_match import (assign_streams, best_match, link_streams, norm as match_norm, parse as match_parse,
+                           _expand as expand_subjects)
 from . import ktp_detect, ktp_import
 try:
     from tkinterdnd2 import DND_FILES
@@ -1081,8 +1082,12 @@ class SchoolEditor(tk.Toplevel):
         results=[]
         for f in files:
             if kinds[f]=="schedule":
+                before=set(self.cfg["course_map"])
                 ok=bool(self.import_schedule(path=f,quiet=True))
-                results.append({"name":f.name,"ok":ok,"note":"розклад завантажено" if ok else "розклад не завантажено"})
+                made=sorted(set(self.cfg["course_map"])-before)
+                note="розклад завантажено" if ok else "розклад не завантажено"
+                if ok and made:note+=f"; створено нових класів: {len(made)}"
+                results.append({"name":f.name,"ok":ok,"note":note})
         for f in files:
             if kinds[f]=="ktp":results.append(self._auto_import_ktp(f,entry,bulk))
             elif kinds[f]=="image":
@@ -1139,47 +1144,90 @@ class SchoolEditor(tk.Toplevel):
         if entry and entry.get("kind")=="course" and not selected and not bulk:
             created=self._ensure_stream_for_course(entry["course"],detection)      # курс без предметів
             selected=[created]
-        targets,note=self._decide_targets(detection,entry,selected,bulk)
+        targets,note,create=self._decide_targets(detection,entry,selected,bulk)
         if created and (not targets or created not in targets):
             self._remove_streams([created],ask=False)                       # тимчасовий потік не знадобився
         if not targets:
             return {"name":name,"ok":False,"note":note or "не вдалося визначити, для якого класу цей КТП"}
+        for stream,course in create.items():                                 # класи з Classroom, яких ще немає в програмі
+            key=stream;number=2
+            while key in self.plans:
+                key=f"{stream} ({number})";number+=1
+            self.plans[key]={"filename":"Очікує файл КТП","lessons":[],"needs_review":True}
+            self.cfg["course_map"][stream]={"plan":key,"course_title":course}
         replaced=[s for s in targets
                   if self.plans.get(self.cfg["course_map"][s]["plan"],{}).get("lessons")]
         self._store_ktp(targets,lessons,name)
         if replaced:note=(note+"; " if note else "")+"замінено наявний КТП: "+", ".join(replaced)
         return {"name":name,"ok":True,"targets":targets,"lessons":len(lessons),"note":note}
 
+    def _canonical_stream(self,course,detection):
+        """Назва потоку для курсу Classroom: «9-Б Право + ГО» + файл Право → «9-Б Право»."""
+        parsed=match_parse(course)
+        if not parsed:return course
+        wanted=expand_subjects(detection.subjects) if detection.subjects else set()
+        subjects=(set(parsed.subjects)&wanted) if wanted else set(parsed.subjects)
+        codes={"IU":"ІУ","VI":"ВІ","GO":"ГО","LAW":"Право"}
+        real=[s for s in subjects if s in codes]
+        if len(real)!=1:return course
+        prefix=f"{parsed.grade}-{parsed.letter.upper()}" if parsed.letter else str(parsed.grade)
+        level={"profile":" профіль","standard":" стандарт"}.get(parsed.level,"")
+        return f"{prefix} {codes[real[0]]}{level}"
+
     def _decide_targets(self,detection,entry,selected,bulk):
-        """(класи, примітка). Спершу зміст файлу; питання лише коли інакше не обійтись (один файл)."""
-        every=sorted(self.cfg["course_map"])
-        if not every:
-            return None,"у програмі ще немає класів: завантажте розклад або додайте курс"
+        """(класи, примітка, {новий_потік: курс Classroom}).
+
+        Класи беруться і з розкладу (потоки), і з Classroom: якщо курс підходить, а потоку ще немає —
+        його буде створено. Питання лише коли інакше не обійтись (один файл).
+        """
+        course_map=self.cfg["course_map"]
+        courses=self._classroom_names()
+        every=sorted(course_map)
+        if not every and not courses:
+            return None,("у програмі ще немає класів: підключіть Google (класи підтягнуться самі) "
+                         "або завантажте розклад"),{}
         found=ktp_detect.targets(detection,every) if detection.grade else []
-        if ktp_detect.level_conflict(found) and not detection.level:found=[]    # профіль чи стандарт — не вгадуємо
-        course=(entry or {}).get("course")
-        if found:
+        create={}
+        assigned=assign_streams({s:i.get("course_title","") for s,i in course_map.items()},courses) if courses else {}
+        if detection.grade and courses:
+            for course in ktp_detect.targets(detection,courses):
+                if any(assigned.get(s)==course for s in found):continue         # цей предмет курсу вже є
+                stream=self._canonical_stream(course,detection)
+                if stream in course_map:
+                    if stream not in found:found.append(stream)
+                else:create[stream]=course
+        pool=sorted(set(found)|set(create))
+        if ktp_detect.level_conflict(pool) and not detection.level:             # профіль чи стандарт — не вгадуємо
+            pool,create=[],{}
+        course_name=(entry or {}).get("course")
+        if pool:
             note=""
-            if selected and not (set(selected)&set(found)):
-                note=f"призначено за змістом файлу, а не до «{course}»"
-            return found,note
+            if selected and not (set(selected)&set(pool)):
+                note=f"призначено за змістом файлу, а не до «{course_name}»"
+            return pool,note,{s:c for s,c in create.items() if s in pool}
         if selected:
             if detection.classes:
                 mine={self._class_of(s) for s in selected}-{None}
                 if mine and not (mine & detection.classes):
                     shown=", ".join(sorted(c.upper() for c in detection.classes))
-                    if bulk:return None,f"у файлі інші класи ({shown}), а відповідного класу в програмі немає"
+                    if bulk:return None,f"у файлі інші класи ({shown}), а відповідного класу в програмі немає",{}
                     if not messagebox.askyesno("Перевірте клас",
-                            f"У файлі є дати для класів: {shown}.\nА ви додаєте цей КТП до «{course}».\n\n"
+                            f"У файлі є дати для класів: {shown}.\nА ви додаєте цей КТП до «{course_name}».\n\n"
                             "Можливо, ви перетягнули файл не на той клас. Усе одно додати?",parent=self):
-                        return None,"не додано: файл для інших класів"
-            chosen=self._pick_streams(selected,[],detection,course,bulk)
-            return (chosen,"") if chosen else (None,"у курсі кілька предметів: вкажіть, для якого цей КТП")
+                        return None,"не додано: файл для інших класів",{}
+            chosen=self._pick_streams(selected,[],detection,course_name,bulk)
+            return ((chosen,"",{}) if chosen else (None,"у курсі кілька предметів: вкажіть, для якого цей КТП",{}))
         if bulk:
-            return None,"не вдалося визначити клас і предмет: киньте цей файл на потрібний клас"
-        if not (self.cfg["course_map"]):return None,"немає класів"
-        chosen=self._ask_choice("Для якого класу цей КТП?","Оберіть клас і предмет, для яких цей файл:",every)
-        return ([chosen],"") if chosen else (None,"не вибрано клас")
+            if detection.grade is None:
+                return None,"не вдалося визначити клас і предмет: киньте цей файл на потрібний клас",{}
+            return None,(f"у Classroom і в програмі немає відповідного класу ({detection.describe()}): "
+                         "киньте файл на потрібний клас"),{}
+        free=[c for c in courses if c not in assigned.values()]
+        chosen=self._ask_choice("Для якого класу цей КТП?","Оберіть клас і предмет, для яких цей файл:",every+free)
+        if not chosen:return None,"не вибрано клас",{}
+        if chosen in course_map:return [chosen],"",{}
+        stream=self._canonical_stream(chosen,detection)
+        return [stream],"",({} if stream in course_map else {stream:chosen})
 
     def _ensure_stream_for_course(self,course,detection):
         """Курс Classroom є, а предметів у програмі ще немає: створює потік за змістом файлу."""
@@ -1249,21 +1297,17 @@ class SchoolEditor(tk.Toplevel):
         self._refresh_planlist()
 
     def _offer_new_streams(self,unknown,rows,schedule,found):
-        """Повертає (залишились_невідомі, розклад, номери_уроків); (None,…) — скасовано.
+        """Повертає (залишились_невідомі, розклад, номери_уроків).
 
-        У порожній програмі нові класи створюються самі; питання лише коли вже є свої класи.
+        Назви, що читаються як «клас + предмет» («8-Б ГО», «11 ІУ профіль»), стають потоками САМІ, без запитань
+        (вони підв'язуються до курсів Classroom). Незрозумілі назви лишаються для ручного зіставлення.
         """
         from .schedule_io import decode_schedule
-        candidates=[x for x in unknown if re.match(r"^\d{1,2}\b",x.strip())]
+        def readable(name):
+            parsed=match_parse(name)
+            return bool(parsed and parsed.subjects)
+        candidates=[x for x in unknown if readable(x)]
         if not candidates:return unknown,schedule,found
-        empty=not self.cfg["course_map"]
-        if not empty:
-            names="\n".join("• "+x for x in candidates[:25])
-            if not messagebox.askyesno("Нові класи з розкладу",
-                    f"У файлі є класи/предмети, яких ще немає в програмі ({len(candidates)}):\n{names}\n\n"
-                    "Створити їх автоматично? Для кожного буде створено потік і порожній КТП."
-                    "\n\n«Так» — створити нові потоки; «Ні» — зіставити з наявними вручну.",parent=self):
-                return unknown,schedule,found
         self._create_streams(candidates)
         schedule,rest,found=decode_schedule(rows,self.cfg)
         return rest,schedule,found
