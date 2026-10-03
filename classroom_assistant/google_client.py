@@ -1,4 +1,5 @@
 """Офіційний Google Classroom + Drive API; ТІЛЬКИ чернетки, публікація вимкнена."""
+import time
 from pathlib import Path
 from .engine import DATA
 
@@ -137,7 +138,7 @@ def create_draft(course_id, title, description, docx_path=None, assignment=False
     return {"id":result["id"],"drive_id":uploaded_ids[0] if uploaded_ids else None,
             "attachment_drive_ids":uploaded_ids[1:] if docx_path else uploaded_ids,
             "course_id":course_id,
-            "kind":"ASSIGNMENT" if assignment else "MATERIAL","state":"DRAFT"}
+            "kind":"ASSIGNMENT" if assignment else "MATERIAL","state":"DRAFT","created_at":time.time()}
 
 
 def token_ready():

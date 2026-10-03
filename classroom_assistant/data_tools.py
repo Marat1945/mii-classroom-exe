@@ -118,7 +118,7 @@ def restore_from_zip(zip_path, safety_zip, root: Path = ROOT) -> int:
 INSTALL_FILE = "install_state.json"
 CLEAN_START_RELEASE = "4.3"            # випуск, у якому один раз виконується «чистий старт»
 KEEP_STATE_KEYS = ("chatgpt_url", "autopaste", "autosend", "autopaste_delay", "column_order",
-                   "watch_downloads", "watch_inbox", "inbox_done")
+                   "watch_downloads", "watch_inbox", "inbox_done", "column_widths")
 
 
 def read_install(data_dir: Path | None = None) -> dict:

@@ -12,7 +12,8 @@ from datetime import date,timedelta,datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
-from .engine import read_json, write_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, word_path, html_classroom_text, DATA, ROOT
+from tkinter import font as tkfont
+from .engine import read_json, write_json, read_state, save_state, day_lessons, build_calendar, week_phase, is_holiday, safe_name, word_path, html_classroom_text, is_task_lesson, DATA, ROOT
 from .documents import create_word
 from .material_library import (parallel_matches,add_document,attach_document,find_for_lesson,signature_key,signature,stream_subject,check_real_docx,copy_for_lesson)
 from .attachments import add_attachments, files_for_lesson, copy_attachments, remove_attachment
@@ -57,7 +58,7 @@ def render_template(text,lesson):
 
 # Ці ключі стану не відкочуються кнопкою «Назад»: чернетки Google вже створено, курси — з Google.
 NON_UNDOABLE=("drafts","drafts_removed","course_ids","classroom_order","chatgpt_url","autopaste","autosend",
-              "autopaste_delay","column_order","blank_offer_37","watch_downloads","watch_inbox","inbox_done")
+              "autopaste_delay","column_order","column_widths","blank_offer_37","watch_downloads","watch_inbox","inbox_done")
 
 WEEKDAYS_UA=("ПОНЕДІЛОК","ВІВТОРОК","СЕРЕДА","ЧЕТВЕР","П’ЯТНИЦЯ","СУБОТА","НЕДІЛЯ")
 
@@ -143,7 +144,9 @@ class MainApp(WindowBase):
         widths=(43,100,140,160,510,60,150)
         for col,width in zip(cols,widths):
             self.grid.heading(col,text=col)
-            self.grid.column(col,width=width,minwidth=42,anchor="w")
+            self.grid.column(col,width=width,minwidth=42,anchor="w",stretch=(col=="Тема"))
+        self._fit_job=None;self._resize_start=False
+        self.grid.bind("<Configure>",lambda _e:self._schedule_fit(),add="+")
         sy=ttk.Scrollbar(table_frame,orient="vertical",command=self.grid.yview)
         sx=ttk.Scrollbar(table_frame,orient="horizontal",command=self.grid.xview)
         self.grid.configure(yscrollcommand=sy.set,xscrollcommand=sx.set)
@@ -157,6 +160,7 @@ class MainApp(WindowBase):
         self.grid.bind("<KP_Enter>",self._enter_creates_draft)
         self.background_menu=self._open_day_menu
         self.grid.bind("<Control-c>",lambda e:self.copy_selected_lessons_as_text())
+        self.grid.bind("<Control-a>",lambda e:(self._select_all_rows(announce=False),"break")[1])
         self.grid.bind("<Delete>",lambda e:self.remove_selected_local_materials())
         self.grid.bind("<ButtonPress-1>",self._column_drag_start,add="+")
         self.grid.bind("<ButtonRelease-1>",self._column_drag_end,add="+")
@@ -193,7 +197,7 @@ class MainApp(WindowBase):
         actions2.add(ttk.Button(actions2,text="Зіставити курси",command=self.map_courses))
         actions2.add(ttk.Button(actions2,text="Зберегти шаблон паралелі",command=self.save_parallel_description))
         self.assignment=tk.BooleanVar(value=False)
-        actions2.add(ttk.Checkbutton(actions2,text="Це завдання для здавання (не матеріал)",variable=self.assignment),padx=8)
+        actions2.add(ttk.Checkbutton(actions2,text="Усе як завдання (інакше — за темою)",variable=self.assignment),padx=8)
         self.watch_var=tk.BooleanVar(value=bool(self.state.get("watch_downloads",True)))
         actions2.add(ttk.Checkbutton(actions2,text="Стежити за «Завантаженнями»",
                                      variable=self.watch_var,command=self._set_watch),padx=8)
@@ -303,6 +307,7 @@ class MainApp(WindowBase):
                 status=remote+document_status
             self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",
                      row.stream,row.course_title,adjusted.topic,row.lesson_number,status))
+        self._schedule_fit(0)
         self.desc.delete("1.0","end")
         if self.rows:
             chosen=next((str(i) for i,x in enumerate(self.rows) if x.unique_key==prior),"0")
@@ -516,15 +521,16 @@ class MainApp(WindowBase):
         from .chatgpt_ui import open_chatgpt_dialog
         open_chatgpt_dialog(self,[lesson],batch=False,replace_existing=replace)
 
-    def chatgpt_batch(self):
-        """Лекції на ВЕСЬ ДЕНЬ: завдання вчителя виконується для всіх уроків дня.
+    def chatgpt_batch(self,only=None):
+        """Лекції на ВЕСЬ ДЕНЬ (або лише для виділених уроків): завдання вчителя виконується для всіх вибраних уроків.
 
         Одна задача на групу паралелей (однакова тема того ж дня — «8-Б-В-Г ВІ»). Уроки, які вже мають Word
         (навіть локальний, якого нема в Classroom), НЕ пропускаються: у вікні вони позначені, а нові файли їх замінять.
         """
-        lessons=[i for i in self.rows if i.status=="готово"]
+        source=self.rows if not only else only
+        lessons=[i for i in source if i.status=="готово"]
         if not lessons:
-            messagebox.showinfo("Розклад","На цю дату немає уроків із перевіреними КТП.");return
+            messagebox.showinfo("Розклад","Серед обраних уроків немає тих, що мають перевірені КТП.");return
         groups=[];seen=set()
         for lesson in lessons:
             key=(signature_key(lesson,self.cfg),lesson.lesson_number,lesson.topic.casefold().strip())
@@ -612,16 +618,28 @@ class MainApp(WindowBase):
 
     def _column_drag_start(self,event):
         self._column_start=None
-        if self.grid.identify_region(event.x,event.y)=="heading":
+        region=self.grid.identify_region(event.x,event.y)
+        self._resize_start=(region=="separator")                    # тягнуть межу стовпця — запам'ятаємо ширину
+        if region=="heading":
             self._column_start=(self.grid.identify_column(event.x),event.x)
 
     def _column_drag_end(self,event):
+        if self._resize_start:
+            self._resize_start=False
+            try:
+                self.state["column_widths"]={c:int(self.grid.column(c,"width")) for c in self.grid_columns}
+                save_state(self.state)
+            except tk.TclError:pass
+            return
         start=self._column_start
         self._column_start=None
         if not start or self.grid.identify_region(event.x,event.y)!="heading":return
         source,index_x=start
+        if abs(event.x-index_x)<14:                                  # просто клац по заголовку — виділити весь день
+            self._select_all_rows()
+            return
         destination=self.grid.identify_column(event.x)
-        if destination==source or abs(event.x-index_x)<14:return
+        if destination==source:return
         try:
             order=list(self.grid["displaycolumns"])
             a,b=int(source[1:])-1,int(destination[1:])-1
@@ -813,9 +831,7 @@ class MainApp(WindowBase):
         if self.selected():self.draft()
         return "break"
 
-    def _open_day_menu(self,event):
-        """Меню для порожнього місця таблиці, шапки й фону вікна: дії над усім днем."""
-        menu=tk.Menu(self,tearoff=False)
+    def _fill_day_menu(self,menu):
         menu.add_command(label="Попередній день",command=lambda:self.shift(-1))
         menu.add_command(label="Наступний день",command=lambda:self.shift(1))
         menu.add_command(label="Сьогодні",
@@ -833,9 +849,166 @@ class MainApp(WindowBase):
         menu.add_command(label="Мої дані…",command=self.data_dialog)
         menu.add_command(label="Початкове налаштування…",command=self.setup_dialog)
         menu.add_command(label="Довідка",command=self.show_help)
+
+    def _popup(self,menu,event):
         try:menu.tk_popup(event.x_root,event.y_root)
         finally:menu.grab_release()
         return "break"
+
+    def _open_day_menu(self,event):
+        """Меню для порожнього місця таблиці й фону вікна: дії над усім днем (+ виділити все)."""
+        menu=tk.Menu(self,tearoff=False)
+        total=len(self.grid.get_children()) if hasattr(self,"grid") else 0
+        if total:
+            menu.add_command(label=f"Виділити всі уроки дня ({total}) — Ctrl+A",
+                             command=lambda:self._select_all_rows(announce=False))
+            menu.add_separator()
+        self._fill_day_menu(menu)
+        return self._popup(menu,event)
+
+    def selected_rows(self):
+        """Виділені уроки в порядку таблиці."""
+        return [self.rows[int(i)] for i in sorted(self.grid.selection(),key=int)]
+
+    def _select_all_rows(self,announce=True):
+        rows=self.grid.get_children()
+        if not rows:return
+        self.grid.selection_set(rows);self.grid.focus(rows[0])
+        if announce:
+            show_toast(self,f"Виділено всі уроки дня: {len(rows)} · права кнопка миші — дії над ними",2200)
+
+    def _open_header_menu(self,event):
+        """Права кнопка на заголовках («№», «Час», «Потік»…): виділення, дії над виділеними, стовпці, день."""
+        count=len(self.grid.selection());total=len(self.grid.get_children())
+        menu=tk.Menu(self,tearoff=False)
+        menu.add_command(label=f"Виділити всі уроки дня ({total}) — Ctrl+A",
+                         command=lambda:self._select_all_rows(announce=False),
+                         state="normal" if total else "disabled")
+        menu.add_command(label="Зняти виділення",command=lambda:self.grid.selection_set(()),
+                         state="normal" if count else "disabled")
+        menu.add_separator()
+        if count:
+            sub=tk.Menu(menu,tearoff=False)
+            self._fill_lesson_menu(sub)
+            menu.add_cascade(label=f"Дії над виділеними уроками ({count})",menu=sub)
+        else:
+            menu.add_command(label="Виділених уроків немає (клацніть заголовок — виділиться весь день)",
+                             state="disabled")
+        menu.add_separator()
+        menu.add_command(label="Ширину стовпців — автоматично (Тема найширша)",command=self.reset_column_widths)
+        menu.add_command(label="Порядок стовпців — за замовчуванням",command=self.reset_column_order)
+        menu.add_separator()
+        self._fill_day_menu(menu)
+        return self._popup(menu,event)
+
+    def reset_column_widths(self):
+        self.state.pop("column_widths",None);save_state(self.state)
+        self._fit_columns()
+        show_toast(self,"Ширину стовпців підібрано автоматично: тема найширша",2000)
+
+    def reset_column_order(self):
+        self.grid.configure(displaycolumns=self.grid_columns)
+        self.state.pop("column_order",None);save_state(self.state)
+
+    # ---------- ширини стовпців: «Тема» найширша й видна повністю ----------
+    def _schedule_fit(self,delay=120):
+        job=getattr(self,"_fit_job",None)
+        if job:
+            try:self.after_cancel(job)
+            except tk.TclError:pass
+        try:self._fit_job=self.after(delay,self._fit_columns)
+        except tk.TclError:self._fit_job=None
+
+    def _fit_columns(self):
+        """Вузькі стовпці — за вмістом, увесь вільний простір — «Темі». Власну ширину (перетягнули межу) шануємо."""
+        self._fit_job=None
+        cols=self.grid_columns
+        available=self.grid.winfo_width()-6
+        if available<200:return
+        saved=self.state.get("column_widths")
+        if isinstance(saved,dict) and set(saved)==set(cols):
+            for col in cols:
+                self.grid.column(col,width=int(saved[col]),stretch=(col=="Тема"))
+            return
+        style_font=ttk.Style().lookup("Treeview","font") or "TkDefaultFont"
+        try:font=tkfont.nametofont(style_font)
+        except tk.TclError:font=tkfont.Font(font=style_font)
+        rows=[self.grid.item(i,"values") for i in self.grid.get_children()]
+        index={c:k for k,c in enumerate(cols)}
+        def need(col,minimum,cap):
+            texts=[col]+[str(r[index[col]]) for r in rows]
+            return max(minimum,min(cap,max(font.measure(t) for t in texts)+28))
+        spec={"№":(44,70),"Час":(104,150),"Потік":(96,230),"Курс Classroom":(120,280),"КТП":(50,80),"Стан":(150,420)}
+        widths={c:need(c,*spec[c]) for c in spec}
+        # мінімуми: «Стан» (статуси чернеток) лишається читабельним, решта стискається сильніше
+        floor={"№":44,"Час":104,"Потік":min(widths["Потік"],160),"Курс Classroom":min(widths["Курс Classroom"],160),
+               "КТП":50,"Стан":min(widths["Стан"],260)}
+        topic_need=need("Тема",260,4000)
+        topic=available-sum(widths.values())
+        for col in ("Стан","Курс Classroom","Потік","Час","КТП","№"):  # теми не вміщаються — стискаємо решту до мінімумів
+            if topic>=topic_need:break
+            give=min(widths[col]-floor[col],topic_need-topic)
+            widths[col]-=give;topic+=give
+        for col,width in widths.items():
+            self.grid.column(col,width=int(width),stretch=False)
+        self.grid.column("Тема",width=int(max(topic,260)),stretch=True)
+
+    def _open_lesson_menu(self,event):
+        region=self.grid.identify_region(event.x,event.y)
+        item=self.grid.identify_row(event.y)
+        if region=="heading":
+            return self._open_header_menu(event)
+        if not item:
+            return self._open_day_menu(event)
+        if item not in self.grid.selection():
+            self.grid.selection_set(item)
+        self.grid.focus(item)
+        menu=tk.Menu(self,tearoff=False)
+        self._fill_lesson_menu(menu)
+        return self._popup(menu,event)
+
+    def _fill_lesson_menu(self,menu):
+        selected_count=len(self.grid.selection())
+        menu.add_command(label="Копіювати таблицю виділених уроків (Ctrl+C)",
+                         command=self.copy_selected_lessons_as_text)
+        menu.add_command(label="Копіювати урок (текст, Word якщо є, вкладення)",
+                         command=self.copy_row_materials)
+        menu.add_command(label=f"Вставити копію у виділені уроки ({selected_count})",
+                         command=self.paste_row_materials,
+                         state="normal" if getattr(self,"_copied_lesson_key",None) else "disabled")
+        menu.add_separator()
+        menu.add_command(label="Взяти попередній урок із паралелі…",
+                         command=lambda:self.borrow_lesson("past"))
+        menu.add_command(label="Взяти майбутній урок із паралелі…",
+                         command=lambda:self.borrow_lesson("future"))
+        menu.add_separator()
+        menu.add_command(label="Лекція через мій ChatGPT…",command=self.chatgpt_word)
+        menu.add_command(label=f"Лекції GPT для виділених уроків ({selected_count})…",
+                         command=lambda:self.chatgpt_batch(only=self.selected_rows()))
+        menu.add_command(label="Лекції GPT на весь день…",command=self.chatgpt_batch)
+        menu.add_command(label="Word: заготовка",command=lambda:self.make_word(False))
+        menu.add_command(label="Вибрати готовий Word…",command=self.choose_docx)
+        menu.add_command(label="Word і картинки пачкою (за назвою)…",command=self.choose_lecture_files)
+        menu.add_command(label="Бібліотека Word…",command=self.library_dialog)
+        menu.add_command(label="Додати файли до Classroom…",command=self.choose_attachments)
+        menu.add_command(label="Відкрити папку Word",command=self.open_folder)
+        menu.add_separator()
+        menu.add_command(label="Редагувати тему / Д/з цього уроку в КТП…",
+                         command=self.edit_lesson_in_ktp)
+        menu.add_command(label="Копіювати повідомлення Classroom",command=self.copy_classroom)
+        menu.add_command(label="Зберегти опис цього уроку",command=self.save_classroom_description)
+        menu.add_command(label="Зберегти шаблон для паралелі",command=self.save_parallel_description)
+        menu.add_separator()
+        menu.add_command(label="Створити ЧЕРНЕТКУ в Classroom…",command=self.draft)
+        menu.add_command(label=f"Створити чернетки для виділених уроків ({selected_count})…",
+                         command=lambda:self.batch_drafts(only=self.selected_rows()))
+        menu.add_command(label="Створити чернетки для всього дня…",command=self.batch_drafts)
+        menu.add_command(label="Мій Classroom — перегляд",command=self.view_classroom)
+        menu.add_command(label="Оновити стан із Classroom",
+                         command=lambda:self.sync_classroom(interactive=False,manual=True))
+        menu.add_separator()
+        menu.add_command(label="Прибрати ЛОКАЛЬНІ матеріали (Delete)",
+                         command=self.remove_selected_local_materials)
 
     def _reload_from_disk(self):
         """Перечитати розклад, КТП і стан з диска (після очищення чи відновлення)."""
@@ -883,54 +1056,6 @@ class MainApp(WindowBase):
         else:
             raise ValueError("Невідома операція")
         self._reload_from_disk()
-
-    def _open_lesson_menu(self,event):
-        item=self.grid.identify_row(event.y)
-        if not item:
-            return self._open_day_menu(event)
-        if item not in self.grid.selection():
-            self.grid.selection_set(item)
-        self.grid.focus(item)
-        menu=tk.Menu(self,tearoff=False)
-        menu.add_command(label="Копіювати таблицю виділених уроків (Ctrl+C)",
-                         command=self.copy_selected_lessons_as_text)
-        menu.add_command(label="Копіювати урок (текст, Word якщо є, вкладення)",
-                         command=self.copy_row_materials)
-        selected_count=len(self.grid.selection())
-        menu.add_command(label=f"Вставити копію у виділені уроки ({selected_count})",
-                         command=self.paste_row_materials,
-                         state="normal" if getattr(self,"_copied_lesson_key",None) else "disabled")
-        menu.add_separator()
-        menu.add_command(label="Взяти попередній урок із паралелі…",
-                         command=lambda:self.borrow_lesson("past"))
-        menu.add_command(label="Взяти майбутній урок із паралелі…",
-                         command=lambda:self.borrow_lesson("future"))
-        menu.add_separator()
-        menu.add_command(label="Лекція через мій ChatGPT…",command=self.chatgpt_word)
-        menu.add_command(label="Лекції GPT на весь день…",command=self.chatgpt_batch)
-        menu.add_command(label="Word: заготовка",command=lambda:self.make_word(False))
-        menu.add_command(label="Вибрати готовий Word…",command=self.choose_docx)
-        menu.add_command(label="Word і картинки пачкою (за назвою)…",command=self.choose_lecture_files)
-        menu.add_command(label="Бібліотека Word…",command=self.library_dialog)
-        menu.add_command(label="Додати файли до Classroom…",command=self.choose_attachments)
-        menu.add_command(label="Відкрити папку Word",command=self.open_folder)
-        menu.add_separator()
-        menu.add_command(label="Редагувати тему / Д/з цього уроку в КТП…",
-                         command=self.edit_lesson_in_ktp)
-        menu.add_command(label="Копіювати повідомлення Classroom",command=self.copy_classroom)
-        menu.add_command(label="Зберегти опис цього уроку",command=self.save_classroom_description)
-        menu.add_command(label="Зберегти шаблон для паралелі",command=self.save_parallel_description)
-        menu.add_separator()
-        menu.add_command(label="Створити ЧЕРНЕТКУ в Classroom…",command=self.draft)
-        menu.add_command(label="Створити чернетки для всього дня…",command=self.batch_drafts)
-        menu.add_command(label="Мій Classroom — перегляд",command=self.view_classroom)
-        menu.add_command(label="Оновити стан із Classroom",
-                         command=lambda:self.sync_classroom(interactive=False,manual=True))
-        menu.add_separator()
-        menu.add_command(label="Прибрати ЛОКАЛЬНІ матеріали (Delete)",
-                         command=self.remove_selected_local_materials)
-        menu.tk_popup(event.x_root,event.y_root)
-        menu.grab_release()
 
     def borrow_lesson(self,when):
         """Ручний вибір попереднього/майбутнього ЗРАЗКА лише в сумісному потоці."""
@@ -1748,6 +1873,11 @@ class MainApp(WindowBase):
             if google_client.token_ready():self.request_sync(400)
         except Exception:pass
 
+    def _draft_is_assignment(self,lesson):
+        """Лекція → «Матеріал». Практична, лабораторна, контрольна, проєктна робота, оцінювання → «Завдання»
+        (інакше діти не зможуть прикріпити відповідь). Галочка «Усе як завдання» вмикає це для всіх."""
+        return bool(self.assignment.get()) or is_task_lesson(lesson.topic)
+
     def request_sync(self,delay=900):
         """Перевірити Classroom після змін (чернетки, розклад): якщо синхронізація йде — повторити по завершенню."""
         def go():
@@ -1879,15 +2009,16 @@ class MainApp(WindowBase):
         if template is not None:return render_template(template,adjusted)
         return html_classroom_text(adjusted,asynchronous=True,video=True)
 
-    def batch_drafts(self):
-        """Створення лише ПЕРЕВІРЕНИХ чернеток за обрану дату, по одній."""
+    def batch_drafts(self,only=None):
+        """Створення лише ПЕРЕВІРЕНИХ чернеток за обрану дату (або лише для виділених уроків), по одній."""
         if self._batch_drafts_running:return
-        if not self.rows:
+        source=self.rows if not only else list(only)
+        if not source:
             messagebox.showinfo("Чернетки за день",
                   "Цього дня немає уроків (можливо, вихідний або канікули).")
             return
         from .draft_batch import plan_day_drafts
-        effective_rows=[self.effective_lesson(row) for row in self.rows]
+        effective_rows=[self.effective_lesson(row) for row in source]
         ready,skipped=plan_day_drafts(
             effective_rows,self.state,self._description_for_batch)
         # Захист від повторів серед вже видимих записів після синхронізації.
@@ -1899,11 +2030,13 @@ class MainApp(WindowBase):
                    "такий урок уже видно у Classroom після синхронізації"))
             else:not_repeated.append(candidate)
         ready=not_repeated
-        summary=[f"Дата: {self.datevar.get()}",
+        summary=[f"Дата: {self.datevar.get()}"+(f" · виділені уроки: {len(source)}" if only else ""),
                  f"Готові для чернеток: {len(ready)}",
                  f"Пропущено: {len(skipped)}"]
+        for candidate in ready:
+            candidate["assignment"]=self._draft_is_assignment(candidate["lesson"])   # до потоку: Tk-змінні лише тут
         summary.extend(f"✓ {x['lesson'].period}. {x['lesson'].stream}: "
-                       f"{x['lesson'].topic[:70]}" for x in ready)
+                       f"{x['lesson'].topic[:70]}"+("  [ЗАВДАННЯ]" if x["assignment"] else "") for x in ready)
         summary.extend(f"— {x.period}. {x.stream}: {reason}"
                        for x,reason in skipped)
         if not ready:
@@ -1911,8 +2044,9 @@ class MainApp(WindowBase):
             return
         confirmation=(
             "\n".join(summary)+
-            "\n\nСтворити тільки ЧЕРНЕТКИ-матеріали в указаних Google-курсах? "
-            "У кожному будуть лише наявні матеріали: текст, перевірений Word "
+            "\n\nСтворити тільки ЧЕРНЕТКИ в указаних Google-курсах? Лекції — як «Матеріал», а практичні, "
+            "контрольні, лабораторні та проєктні роботи — як «Завдання» (учні зможуть здати відповідь). "
+            "У кожній будуть лише наявні матеріали: текст, перевірений Word "
             "(за наявності) та додаткові вкладення. "
             "Учні НЕ отримають публікацій. Відео додаються вручну.\n\n"
             "Перевірте теми, дати й домашні завдання до підтвердження."
@@ -1935,7 +2069,8 @@ class MainApp(WindowBase):
                 try:
                     record=create_draft(
                         item["course_id"],item["title"],item["description"],
-                        item["docx_path"],False,item["attachments"])
+                        item["docx_path"],item["assignment"],item["attachments"])
+                    if isinstance(record,dict):record.setdefault("created_at",time.time())
                 except Exception as ex:
                     errors.append(f"{item['lesson'].stream}: {ex}")
                     # Stop: the reason might be a network or authorization error.
@@ -2010,7 +2145,7 @@ class MainApp(WindowBase):
                 parent=self):
             return
         text=self.desc.get("1.0","end").strip()
-        assignment=self.assignment.get()
+        assignment=self._draft_is_assignment(lesson)
         attachment_paths=files_for_lesson(self.state,key)
         if len(attachment_paths)!=len(self.state.get("attachments",{}).get(key,[])):
             messagebox.showerror("Вкладення",
@@ -2023,6 +2158,7 @@ class MainApp(WindowBase):
         confirm=("Створити ТІЛЬКИ ЧЕРНЕТКУ?\n\n"
                  f"Курс: {lesson.course_title}\nДата уроку: {lesson.day}\n"
                  f"Тема: {lesson.topic[:110]}\n"
+                 f"Тип: {'ЗАВДАННЯ (учні зможуть здати відповідь)' if assignment else 'Матеріал'}\n"
                  f"Word: {'додається' if word_path else 'не потрібний / не додається'}\n"
                  f"Текст: {'є' if text else 'без опису'}\n"
                  f"Додаткові вкладення: {len(attachment_paths)}\n\n"
@@ -2038,7 +2174,8 @@ class MainApp(WindowBase):
             if isinstance(result,dict):result["created_at"]=time.time()
             self.state.setdefault("drafts",{})[key]=result
             save_state(self.state);self.update_day()
-            show_toast(self,"✓ Чернетку створено (DRAFT) · учні її не бачать · перевіряю Classroom…",3000)
+            show_toast(self,f"✓ Чернетку створено ({'Завдання' if assignment else 'Матеріал'}, DRAFT) · "
+                            "учні її не бачать · перевіряю Classroom…",3200)
             self.request_sync(1200)
         self.worker(task,done)
 

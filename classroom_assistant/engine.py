@@ -155,12 +155,18 @@ def check_configuration(config=None,plans=None):
         if not p["lessons"]: warnings.append(f"Порожній КТП {plan_id}")
     return warnings
 
-TASK_WORDS=("практичн","оцінюван","контрольн")
+TASK_PATTERN=re.compile(
+    r"практичн|лабораторн|контрольн|оцінюван|перевірн\w*\s+робот|діагностичн|самостійн\w*\s+робот"
+    r"|підсумков\w*\s+(?:робот|контрол)|урок\w*\s+контролю|тематичн\w*\s+атестац"
+    r"|навчальн\w*\s+про[єе]кт|про[єе]ктн\w*")
 
 def is_task_lesson(topic):
-    """Практичне заняття чи урок контролю/оцінювання: замість лекції — завдання для самостійної роботи."""
-    low=(topic or "").casefold()
-    return any(word in low for word in TASK_WORDS)
+    """Практична, лабораторна, контрольна, проєктна робота, оцінювання: учні мають ЗДАТИ відповідь.
+
+    Для таких уроків у Classroom створюється «Завдання» (не «Матеріал»), а в запиті до GPT — завдання замість лекції.
+    Звичайні теми («Контроль над територією», «Протести», «Проєкт Конституції») сюди не потрапляють.
+    """
+    return bool(TASK_PATTERN.search((topic or "").casefold()))
 
 def html_classroom_text(lesson:Lesson, asynchronous=True, video=True):
     intro=(f"Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic.strip()}\n")

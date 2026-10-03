@@ -14,7 +14,11 @@ def _press(event):
             return
         if event.state & (SHIFT | CONTROL):
             return                          # Shift/Ctrl+клац — стандартна поведінка
-        if tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+        region = tree.identify_region(event.x, event.y)
+        if region == "nothing" and not tree.identify_row(event.y):
+            tree._drag_select = {"band": event.y, "last": None}      # порожнє місце під рядками: «гумка»
+            return
+        if region not in ("cell", "tree"):
             return
         row = tree.identify_row(event.y)
         if row:
@@ -34,6 +38,17 @@ def _motion(event):
             tree.yview_scroll(-1, "units")
         elif event.y > height:
             tree.yview_scroll(1, "units")
+        if "band" in state:
+            low, high = sorted((state["band"], min(max(event.y, 0), height)))
+            picked = []
+            for row in tree.get_children(""):
+                box = tree.bbox(row)
+                if box and box[1] + box[3] >= low and box[1] <= high:
+                    picked.append(row)
+            if (low, high, tuple(picked)) != state["last"]:
+                state["last"] = (low, high, tuple(picked))
+                tree.selection_set(picked)
+            return
         row = tree.identify_row(min(max(event.y, 2), max(height - 2, 3)))
         if not row:
             return

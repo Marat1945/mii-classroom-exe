@@ -320,3 +320,113 @@ class DayRegenerationTests(TempProgram):
         self.assertEqual(len(jobs), 1)
         self.assertIn("ПЛАТНИХ AI-запитів", asked[-1])
         self.assertIn("буде замінено", asked[-1])
+
+
+class ClassroomTypeTests(TempProgram):
+    """Лекція → «Матеріал»; практична/лабораторна/контрольна/проєктна робота, оцінювання → «Завдання»."""
+
+    TASKS = ["Практична робота. Історичне значення Французької революції.", "Практичне завдання", "Практичне заняття",
+             "Навчальний проект. Стадії боротьби за незалежність: від УНР до УПА.", "Навчальний проєкт", "Проєктна робота",
+             "Лабораторна робота", "Контрольна робота", "Урок контролю", "Тематичне оцінювання", "Самостійна робота",
+             "Перевірна робота", "Діагностична робота", "Підсумкова робота", "Тематична атестація"]
+    LECTURES = ["Суспільство. Що об’єднує людей у суспільство.", "Урок узагальнення з теми", "Протести проти політики уряду",
+                "Встановлення контролю над територією", "Проект Конституції Пилипа Орлика", "Церковні унії в Україні",
+                "Контекст розвитку культури", "Протестантизм і Реформація"]
+
+    def test_which_topics_count_as_practical_or_control(self):
+        for topic in self.TASKS:
+            self.assertTrue(engine.is_task_lesson(topic), topic)
+        for topic in self.LECTURES:
+            self.assertFalse(engine.is_task_lesson(topic), topic)
+
+    def test_the_prompt_for_a_project_or_lab_asks_for_analytical_tasks_too(self):
+        from dataclasses import replace
+        from classroom_assistant.chatgpt_bridge import build_prompt
+        base = self.lessons[0]
+        for topic in ("Навчальний проект. Стадії боротьби", "Лабораторна робота"):
+            text = build_prompt(replace(base, topic=topic))
+            self.assertIn("НЕ БІЛЬШЕ ніж 3 аналітичними завданнями", text, topic)
+            self.assertIn("(учні здають відповідь)", text)
+
+    def run_single_draft(self, topic):
+        from dataclasses import replace
+        lesson = replace(self.lessons[0], topic=topic)
+        self.app.rows = [lesson]
+        calls = []
+        self.app.state["course_ids"][lesson.course_title] = "555"
+        self.app.state.pop("drafts", None)
+        self.app.selected = lambda: lesson
+        self.app.effective_lesson = lambda row: row
+        self.app.worker = lambda task, done: done(task())
+        self.app.update_day = lambda: None
+        self.app.desc.delete("1.0", "end")
+        self.app.desc.insert("1.0", "Текст для учнів")
+        asked = []
+        record = {"id": "x1", "kind": "?", "state": "DRAFT", "created_at": time.time()}
+        with mock.patch.object(gui.messagebox, "askyesno", side_effect=lambda t, m, **k: asked.append(m) or True), \
+                mock.patch.object(google_client, "create_draft", side_effect=lambda *a, **k: calls.append(a) or dict(record)):
+            self.app.draft()
+        return calls, asked
+
+    def test_single_draft_type_follows_the_topic(self):
+        calls, asked = self.run_single_draft("Практична робота. Історичне значення Французької революції.")
+        self.assertTrue(calls[0][4])                                              # assignment=True
+        self.assertIn("Тип: ЗАВДАННЯ (учні зможуть здати відповідь)", asked[0])
+        self.assertIn("Завдання", self.toasts[-1])
+        calls, asked = self.run_single_draft("Суспільство. Що об’єднує людей у суспільство.")
+        self.assertFalse(calls[0][4])                                             # матеріал
+        self.assertIn("Тип: Матеріал", asked[0])
+
+    def test_the_checkbox_forces_everything_to_be_an_assignment(self):
+        self.app.assignment.set(True)
+        calls, _ = self.run_single_draft("Суспільство. Що об’єднує людей у суспільство.")
+        self.assertTrue(calls[0][4])
+
+    def test_batch_creates_lectures_as_materials_and_practical_works_as_assignments(self):
+        rows = self.app.rows if self.app.rows else []
+        self.app.datevar.set("05.10.2026")
+        self.app.update_day()
+        rows = list(self.app.rows)
+        for row in rows:
+            self.app.state["course_ids"][row.course_title] = str(abs(hash(row.course_title)) % 10 ** 6)
+        calls = []
+
+        def fake_create(course_id, title, description, docx, assignment, attachments):
+            calls.append((title, assignment))
+            return {"id": f"d{len(calls)}", "kind": "ASSIGNMENT" if assignment else "MATERIAL", "state": "DRAFT"}
+        with mock.patch.object(google_client, "create_draft", side_effect=fake_create), \
+                mock.patch.object(gui.messagebox, "askyesno", return_value=True), \
+                mock.patch.object(gui.messagebox, "showinfo"), mock.patch.object(gui.messagebox, "showwarning"):
+            self.app.request_sync = lambda *a, **k: None
+            self.app.batch_drafts()
+            deadline = time.time() + 8
+            while self.app._batch_drafts_running and time.time() < deadline:
+                self.app.update()
+                time.sleep(0.02)
+        self.assertEqual(len(calls), len(rows))
+        for (title, assignment), row in zip(calls, rows):
+            self.assertEqual(assignment, engine.is_task_lesson(row.topic), row.topic)
+        self.assertTrue(any(a for _, a in calls) and any(not a for _, a in calls))      # у цей день є і те, і те
+        records = self.app.state["drafts"]
+        self.assertEqual(len(records), len(rows))
+        self.assertTrue(all(r.get("created_at") for r in records.values()))            # кожна чернетка має час створення
+
+    def test_a_just_created_draft_is_not_taken_for_a_deleted_one_by_the_next_sync(self):
+        lesson = self.lessons[0]
+        self.app.state.setdefault("drafts", {})[lesson.unique_key] = {"id": "new1", "created_at": time.time()}
+        self.app._sync_started = time.time()
+        self.app._sync_done(self.result(), False)                                  # Classroom ще не віддає свіжу чернетку
+        self.assertIn(lesson.unique_key, self.app.state["drafts"])
+
+    def test_create_draft_uses_the_right_endpoint_and_stamps_the_time(self):
+        classroom, drive = mock.MagicMock(), mock.MagicMock()
+        classroom.courses().courseWork().create().execute.return_value = {"id": "w1"}
+        classroom.courses().courseWorkMaterials().create().execute.return_value = {"id": "m1"}
+        with mock.patch.object(google_client, "services", return_value=(classroom, drive)):
+            task = google_client.create_draft("1", "Урок", "опис", None, True, None)
+            lecture = google_client.create_draft("1", "Урок", "опис", None, False, None)
+        self.assertEqual((task["kind"], task["id"]), ("ASSIGNMENT", "w1"))
+        self.assertEqual((lecture["kind"], lecture["id"]), ("MATERIAL", "m1"))
+        self.assertTrue(task["created_at"] and lecture["created_at"])
+        body = classroom.courses().courseWork().create.call_args.kwargs["body"]
+        self.assertEqual((body["workType"], body["state"]), ("ASSIGNMENT", "DRAFT"))     # лише чернетка, не публікація
