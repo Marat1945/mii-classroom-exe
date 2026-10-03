@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from pathlib import Path
 from .editor_core import (deep_copy_data, guess_columns, extract_lessons,
-    docx_table_rows, csv_rows, persist, validate_working, tidy,
+    docx_table_rows, csv_rows, persist, validate_working, tidy, migrate_stream_keys,
     import_source_dates, source_date_for_stream, parse_source_dates, import_notes)
 from .engine import ROOT, save_state, build_calendar
 from .window_ui import fit_work_window
@@ -509,6 +509,7 @@ class SchoolEditor(tk.Toplevel):
         self.planlist.bind("<<ListboxSelect>>",self.plan_selected)
         self.planlist.bind("<Button-3>",self._plan_context_menu)
         self.planlist.bind("<Delete>",lambda e:self.delete_ktp())
+        self.planlist.bind("<F2>",lambda e:self.rename_subject())
         self.planlist.bind("<Control-c>",lambda e:self.copy_plan_data())
         ttk.Button(left,text="+ Додати курс",command=lambda:self.edit_course(True)).pack(fill="x",pady=(4,2))
         ttk.Button(left,text="✎ Редагувати курс",command=lambda:self.edit_course(False)).pack(fill="x",pady=2)
@@ -572,6 +573,8 @@ class SchoolEditor(tk.Toplevel):
             self.plan_selected()
             menu.add_command(label="Імпортувати КТП для цього класу…",command=self.import_plan)
             menu.add_command(label="Редагувати курс…",command=lambda:self.edit_course(False))
+            menu.add_command(label="Перейменувати предмет… (F2)",command=self.rename_subject)
+            menu.add_command(label="Розклад: чисельник / знаменник…",command=self.edit_course_schedule)
             menu.add_command(label="Додати новий курс…",command=lambda:self.edit_course(True))
             menu.add_separator()
             menu.add_command(label="Позначити КТП перевіреним",command=self.approve_plan)
@@ -648,6 +651,12 @@ class SchoolEditor(tk.Toplevel):
                 ordered.append(title)
         return ordered
 
+    @staticmethod
+    def _subject_label(stream):
+        """«9-Б Право» → «Право» (клас уже видно з назви курсу)."""
+        short=re.sub(r"^\s*\d{1,2}(?:\s*-\s*[А-Яа-яІіЇїЄєҐґA-Za-z])?\s+","",stream)
+        return short or stream
+
     def _build_list_entries(self):
         entries=[];used=set()
         titles=self._classroom_course_titles()
@@ -656,13 +665,22 @@ class SchoolEditor(tk.Toplevel):
             streams=sorted(s for s,course in assigned.items() if course==title)
             plans=[self.cfg["course_map"][s]["plan"] for s in streams]
             used.update(plans)
+            if len(streams)>1 and len(set(plans))>1:
+                # Спільний курс («Право + ГО»): кожен предмет — окремий рядок зі своїм КТП
+                for stream in streams:
+                    key=self.cfg["course_map"][stream]["plan"]
+                    has=bool(self.plans.get(key,{}).get("lessons"))
+                    entries.append({"kind":"course","course":title,"streams":[stream],"course_streams":streams,
+                        "plan":key if key in self.plans else None,"filled":has,
+                        "label":f"{title}  ▸ {self._subject_label(stream)}"+("" if has else "   — без КТП")})
+                continue
             filled=[p for p in plans if p in self.plans and self.plans[p].get("lessons")]
             plan=(filled or [p for p in plans if p in self.plans] or [None])[0]
             if streams and len(filled)==len({*plans}):label=title
             elif filled:label=title+"   — КТП частково"
             else:label=title+"   — без КТП"
-            entries.append({"kind":"course","course":title,"streams":streams,"plan":plan,
-                            "filled":bool(filled),"label":label})
+            entries.append({"kind":"course","course":title,"streams":streams,"course_streams":streams,
+                            "plan":plan,"filled":bool(filled),"label":label})
         for key in self.plans:
             if key not in used:
                 entries.append({"kind":"plan","course":None,"streams":[],"plan":key,
@@ -731,7 +749,9 @@ class SchoolEditor(tk.Toplevel):
     def focus_lesson(self,stream,number):
         """Відкрити КТП клітинки з головного вікна: клас → план → рядок уроку."""
         course=self.cfg["course_map"].get(stream,{}).get("course_title")
-        ix=next((i for i,e in enumerate(self.list_entries) if e.get("course")==course),None)
+        ix=next((i for i,e in enumerate(self.list_entries) if stream in e.get("streams",[])),None)
+        if ix is None:
+            ix=next((i for i,e in enumerate(self.list_entries) if e.get("course")==course),None)
         if ix is None:return
         self.notebook.select(self.tab_plans)
         self.planlist.selection_clear(0,"end");self.planlist.selection_set(ix)
@@ -930,19 +950,143 @@ class SchoolEditor(tk.Toplevel):
         self.refresh_streams();self._refresh_planlist(course=entry["course"])
         return "break"
 
+    def _ask_text(self,title,prompt,initial="",parent=None):
+        dialog=tk.Toplevel(parent or self);dialog.title(title);dialog.transient(parent or self)
+        dialog.escape_closes=True;fit_work_window(dialog,"small")
+        ttk.Label(dialog,text=prompt,wraplength=480).pack(anchor="w",padx=14,pady=(14,4))
+        value=tk.StringVar(value=initial)
+        entry=ttk.Entry(dialog,textvariable=value,width=48);entry.pack(padx=14,pady=4)
+        entry.focus_set();entry.select_range(0,"end")
+        result={"value":None}
+        def ok():
+            result["value"]=value.get().strip();dialog.destroy()
+        row=ttk.Frame(dialog);row.pack(pady=12)
+        ttk.Button(row,text="Гаразд",command=ok).pack(side="left",padx=6)
+        ttk.Button(row,text="Скасувати",command=dialog.destroy).pack(side="left")
+        dialog.bind("<Return>",lambda _e:ok())
+        dialog.grab_set();(parent or self).wait_window(dialog)
+        return result["value"]
+
+    def rename_stream(self,old,new):
+        """Перейменування предмета (потоку). Збережені Word, вкладення й чернетки переносяться при збереженні."""
+        new=tidy(new)
+        if not new or "|" in new:
+            raise ValueError("Назва порожня або містить знак «|».")
+        if new==old:return
+        if any(match_norm(s)==match_norm(new) for s in self.cfg["course_map"] if s!=old):
+            raise ValueError("Потік із такою назвою вже є.")
+        self.cfg["course_map"]={(new if s==old else s):i for s,i in self.cfg["course_map"].items()}
+        for pairs in self.cfg["days"].values():
+            for pair in pairs:
+                for k in (0,1):
+                    if pair[k]==old:pair[k]=new
+        aliases=self.cfg.get("schedule_aliases")
+        if aliases:
+            for key,value in list(aliases.items()):
+                if value==old:aliases[key]=new
+        renames=self.cfg.setdefault("pending_stream_renames",{})
+        origin=next((o for o,n in renames.items() if n==old),old)
+        if origin==new:renames.pop(origin,None)
+        else:renames[origin]=new
+        if not renames:self.cfg.pop("pending_stream_renames",None)
+        self.refresh_streams();self.refresh_slots();self._refresh_planlist()
+
+    def rename_subject(self):
+        """F2 / меню: перейменувати вибраний предмет (потік) прямо зі списку класів."""
+        entry=self.current_entry
+        if not entry or entry.get("kind")!="course" or not entry["streams"]:
+            messagebox.showinfo("Предмет","Виберіть клас або предмет у списку зліва.",parent=self);return "break"
+        streams=entry["streams"]
+        old=streams[0] if len(streams)==1 else self._ask_choice(
+            "Який предмет перейменувати?",f"У курсі «{entry['course']}» кілька потоків:",sorted(streams))
+        if not old:return "break"
+        new=self._ask_text("Перейменувати предмет","Нова назва потоку (як у розкладі):",old)
+        if not new or new==old:return "break"
+        try:self.rename_stream(old,new)
+        except ValueError as ex:messagebox.showerror("Предмет",str(ex),parent=self)
+        return "break"
+
+    def edit_course_schedule(self,entry=None,streams=None):
+        """Предмети одного курсу, що чергуються по тижнях: окремо на чисельник і на знаменник."""
+        entry=entry or self.current_entry
+        if not entry or entry.get("kind")!="course":
+            messagebox.showinfo("Розклад","Виберіть клас у списку зліва.",parent=self);return
+        subjects=list(streams or entry.get("course_streams") or entry["streams"])
+        if not subjects:
+            messagebox.showinfo("Розклад","У цього курсу ще немає предметів: спершу «Редагувати курс».",parent=self);return
+        names=("Понеділок","Вівторок","Середа","Четвер","П’ятниця")
+        none="— немає —"
+        dialog=tk.Toplevel(self);dialog.title(f"Розклад: {entry['course']}");dialog.transient(self)
+        dialog.escape_closes=True;fit_work_window(dialog,"normal")
+        ttk.Label(dialog,wraplength=700,justify="left",foreground="#365777",text=(
+            "Предмети цього курсу можуть чергуватися по тижнях: наприклад, Право — у ЧИСЕЛЬНИК, ГО — у ЗНАМЕННИК "
+            "(або один урок на два тижні: тоді другий тиждень лишіть «— немає —»). Оберіть день, номер уроку та "
+            "предмет для кожного тижня.")).pack(anchor="w",padx=14,pady=(12,6))
+        grid=ttk.Frame(dialog);grid.pack(anchor="w",padx=14)
+        day=tk.StringVar(value=names[0]);number=tk.StringVar(value="1")
+        top=tk.StringVar(value=subjects[0]);bottom=tk.StringVar(value=subjects[1] if len(subjects)>1 else none)
+        count=len(self.cfg["period_times"])
+        ttk.Label(grid,text="День:").grid(row=0,column=0,sticky="w",pady=4)
+        ttk.Combobox(grid,textvariable=day,values=names,state="readonly",width=14).grid(row=0,column=1,padx=6)
+        ttk.Label(grid,text="Урок №:").grid(row=0,column=2,sticky="w",padx=(14,0))
+        ttk.Combobox(grid,textvariable=number,values=[str(i) for i in range(1,count+1)],state="readonly",
+                     width=5).grid(row=0,column=3,padx=6)
+        ttk.Label(grid,text="ЧИСЕЛЬНИК:").grid(row=1,column=0,sticky="w",pady=4)
+        ttk.Combobox(grid,textvariable=top,values=[none]+subjects,state="readonly",width=28).grid(row=1,column=1,columnspan=3,padx=6,sticky="w")
+        ttk.Label(grid,text="ЗНАМЕННИК:").grid(row=2,column=0,sticky="w",pady=4)
+        ttk.Combobox(grid,textvariable=bottom,values=[none]+subjects,state="readonly",width=28).grid(row=2,column=1,columnspan=3,padx=6,sticky="w")
+        ttk.Label(dialog,text="Вже в розкладі для цього курсу:").pack(anchor="w",padx=14,pady=(10,2))
+        box=tk.Listbox(dialog,height=8,exportselection=False);box.pack(fill="both",expand=True,padx=14)
+        places=[]
+
+        def refresh():
+            box.delete(0,"end");places.clear()
+            for d in range(5):
+                for i,pair in enumerate(self.cfg["days"].get(str(d),[])):
+                    if pair[0] in subjects or pair[1] in subjects:
+                        places.append((d,i))
+                        box.insert("end",f"{names[d]}, урок {i+1}:  чисельник — {pair[0] or '—'};  знаменник — {pair[1] or '—'}")
+        def assign():
+            a=None if top.get()==none else top.get();b=None if bottom.get()==none else bottom.get()
+            if a is None and b is None:
+                messagebox.showwarning("Розклад","Оберіть предмет хоча б для одного тижня.",parent=dialog);return
+            d=names.index(day.get());i=int(number.get())-1
+            current=self.cfg["days"][str(d)][i]
+            foreign=[x for x in current if x and x not in subjects and x not in (a,b)]
+            if foreign and not messagebox.askyesno("Урок зайнятий",
+                    f"У цьому уроці вже стоїть: {', '.join(foreign)}.\nЗамінити?",parent=dialog):return
+            self.cfg["days"][str(d)][i]=[a,b]
+            self.refresh_slots();refresh()
+        def remove():
+            picked=box.curselection()
+            if not picked:return
+            d,i=places[picked[0]]
+            pair=self.cfg["days"][str(d)][i]
+            self.cfg["days"][str(d)][i]=[None if x in subjects else x for x in pair]
+            self.refresh_slots();refresh()
+        buttons=ttk.Frame(dialog);buttons.pack(fill="x",padx=14,pady=10)
+        ttk.Button(buttons,text="Призначити",command=assign).pack(side="left")
+        ttk.Button(buttons,text="Прибрати вибраний рядок з розкладу",command=remove).pack(side="left",padx=8)
+        ttk.Button(buttons,text="Закрити",command=dialog.destroy).pack(side="right")
+        from types import SimpleNamespace
+        dialog.api=SimpleNamespace(day=day,number=number,top=top,bottom=bottom,assign=assign,remove=remove,
+                                   box=box,places=places,subjects=subjects)
+        refresh();dialog.grab_set()
+
     def delete_course(self):
         entry=self.current_entry
         if not entry or entry.get("kind")!="course":return
-        if not entry["streams"]:
+        streams=entry.get("course_streams") or entry["streams"]
+        if not streams:
             messagebox.showinfo("Курс","У цього курсу Classroom немає предметів у програмі.",parent=self);return
-        self._remove_streams(entry["streams"],f"курс «{entry['course']}»")
+        self._remove_streams(streams,f"курс «{entry['course']}» (усі його предмети)")
 
     def edit_course(self,new=False):
         """Редагування курсу (напр. спільний «Право + ГО») та додавання нового курсу."""
         entry=None if new else self.current_entry
         if not new and (not entry or entry.get("kind")!="course"):
             messagebox.showinfo("Курс","Виберіть клас у списку зліва.",parent=self);return
-        original=list(entry["streams"]) if entry else []
+        original=list(entry.get("course_streams") or entry["streams"]) if entry else []
         streams=list(original);created=[]
         dialog=tk.Toplevel(self);dialog.title("Додати курс" if new else "Редагувати курс")
         dialog.transient(self);dialog.escape_closes=True;fit_work_window(dialog,"normal")
@@ -953,8 +1097,9 @@ class SchoolEditor(tk.Toplevel):
             )).pack(anchor="w",padx=14,pady=(12,6))
         ttk.Label(dialog,text="Назва курсу в Google Classroom:").pack(anchor="w",padx=14)
         title=tk.StringVar(value=entry["course"] if entry else "")
-        free=[e["course"] for e in self.list_entries
-              if e.get("course") and (not e["streams"] or e is entry)]
+        free=list(dict.fromkeys(
+            [e["course"] for e in self.list_entries if e.get("course") and not e["streams"]]
+            +([entry["course"]] if entry else [])))
         ttk.Combobox(dialog,textvariable=title,values=free,width=60).pack(anchor="w",padx=14,pady=(2,8))
         ttk.Label(dialog,text="Предмети цього курсу (потоки):").pack(anchor="w",padx=14)
         box=tk.Listbox(dialog,height=6,exportselection=False)
@@ -994,14 +1139,36 @@ class SchoolEditor(tk.Toplevel):
         buttons=ttk.Frame(dialog);buttons.pack(fill="x",padx=14)
         ttk.Button(buttons,text="+ Додати предмет",command=add_subject).pack(side="left")
         ttk.Button(buttons,text="− Прибрати вибраний",command=remove_subject).pack(side="left",padx=8)
+
+        def rename_selected():
+            picked=box.curselection()
+            if not picked:
+                messagebox.showinfo("Предмет","Виберіть предмет у списку.",parent=dialog);return
+            old=streams[picked[0]]
+            new=self._ask_text("Перейменувати предмет","Нова назва потоку (як у розкладі):",old,dialog)
+            if not new or new==old:return
+            try:
+                if old in created:
+                    if new in streams or new in self.cfg["course_map"]:raise ValueError("Потік із такою назвою вже існує")
+                    created[created.index(old)]=new
+                else:
+                    self.rename_stream(old,new)
+                    if old in original:original[original.index(old)]=new
+            except ValueError as ex:
+                messagebox.showerror("Предмет",str(ex),parent=dialog);return
+            streams[picked[0]]=new;render()
+        ttk.Button(buttons,text="✎ Перейменувати вибраний",command=rename_selected).pack(side="left")
+        ttk.Button(buttons,text="Розклад: чисельник / знаменник…",
+                   command=lambda:(self.edit_course_schedule(entry,streams) if entry else None)).pack(side="left",padx=8)
         def ok():
             course=title.get().strip()
             if not course:
                 messagebox.showerror("Курс","Вкажіть назву курсу.",parent=dialog);return
             if not streams:
                 messagebox.showerror("Курс","У курсі має бути хоча б один предмет.",parent=dialog);return
-            clash=[e for e in self.list_entries if e.get("course") and e is not entry
-                   and match_norm(e["course"])==match_norm(course) and e["streams"]]
+            own=match_norm(entry["course"]) if entry else None
+            clash=[e for e in self.list_entries if e.get("course") and e["streams"]
+                   and match_norm(e["course"])==match_norm(course) and match_norm(course)!=own]
             if clash:
                 messagebox.showerror("Курс","Курс із такою назвою вже є.",parent=dialog);return
             for stream in created:
@@ -1021,7 +1188,7 @@ class SchoolEditor(tk.Toplevel):
         ttk.Button(foot,text="Скасувати",command=dialog.destroy).pack(side="left")
         from types import SimpleNamespace
         dialog.api=SimpleNamespace(title=title,cls=cls,subject=subject,name=name,add=add_subject,
-                                   remove=remove_subject,ok=ok,box=box,streams=streams)
+                                   remove=remove_subject,ok=ok,box=box,streams=streams,rename=rename_selected)
         render();dialog.grab_set()
 
     def add_plan(self):
@@ -2134,12 +2301,14 @@ class SchoolEditor(tk.Toplevel):
         self.cfg["print_numbers"]=self.show_numbers.get()
         self.cfg["workload_teacher"]=self.teacher_var.get().strip()
         self.cfg["workload_code"]=self.code_var.get().strip()
+        renames=dict(self.cfg.pop("pending_stream_renames",None) or {})        # переносимо після запису
         errors=validate_working(self.cfg,self.plans)
         # Клас без КТП — не помилка: вчитель може завантажити КТП пізніше.
         errors=[e for e in errors if not e.startswith("Порожній КТП")]
         if errors:
+            if renames:self.cfg["pending_stream_renames"]=renames
             messagebox.showerror("Помилки у даних","Виправте перед збереженням:\n"+"\n".join(errors[:20]),parent=self);return
-        if self.cfg==self.original_cfg and self.plans==self.original_plans:
+        if self.cfg==self.original_cfg and self.plans==self.original_plans and not renames:
             if confirm:messagebox.showinfo("Дані","Змін немає.",parent=self)
             return True
         reset=bool(getattr(self,"_is_new_year",False))
@@ -2162,10 +2331,13 @@ class SchoolEditor(tk.Toplevel):
         empty=[s for s,i in self.cfg["course_map"].items() if not self.plans.get(i["plan"],{}).get("lessons")]
         if empty:
             message+=f"\n\nБез КТП лишилось класів: {len(empty)}. Це не помилка: КТП можна завантажити пізніше."
-        if confirm and not messagebox.askyesno("Збереження",message,parent=self):return
+        if confirm and not messagebox.askyesno("Збереження",message,parent=self):
+            if renames:self.cfg["pending_stream_renames"]=renames
+            return
         state=self.parent.state
         try:
             backup=persist(self.cfg,self.plans,state,"Редагування КТП і розкладу у програмі")
+            if renames:migrate_stream_keys(state,renames)
             if educational_changes:
                 for entry in state.get("files",{}).values():
                     entry["validated"]=False
@@ -2179,6 +2351,7 @@ class SchoolEditor(tk.Toplevel):
             self.parent.state=state
             self.parent.update_day()
         except Exception as ex:
+            if renames:self.cfg["pending_stream_renames"]=renames
             messagebox.showerror("Помилка збереження",str(ex),parent=self);return
         self.original_cfg=copy.deepcopy(self.cfg);self.original_plans=copy.deepcopy(self.plans)
         self._is_new_year=False

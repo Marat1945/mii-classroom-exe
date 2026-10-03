@@ -155,6 +155,13 @@ def check_configuration(config=None,plans=None):
         if not p["lessons"]: warnings.append(f"Порожній КТП {plan_id}")
     return warnings
 
+TASK_WORDS=("практичн","оцінюван","контрольн")
+
+def is_task_lesson(topic):
+    """Практичне заняття чи урок контролю/оцінювання: замість лекції — завдання для самостійної роботи."""
+    low=(topic or "").casefold()
+    return any(word in low for word in TASK_WORDS)
+
 def html_classroom_text(lesson:Lesson, asynchronous=True, video=True):
     intro=(f"Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic.strip()}\n")
     if asynchronous:
@@ -162,35 +169,39 @@ def html_classroom_text(lesson:Lesson, asynchronous=True, video=True):
     return (intro+
       "\nДоброго дня, шановні учні! 👋\n\n"
       f"Сьогодні опрацьовуємо тему: «{lesson.topic}».\n\n"
-      + ("1. Перегляньте прикріплене відео до теми.\n" if video else "")
-      + "2. Уважно опрацюйте прикріплений матеріал уроку.\n"
-        "3. Наприкінці Word-документа знайдіть «ПЛАН-КОНСПЕКТ УРОКУ ДЛЯ ЗАПИСУ В ЗОШИТ».\n"
-        "4. ✍️ Запишіть лише цей план-конспект; всю лекцію переписувати не потрібно.\n\n"
-        "❗ Під час повітряної тривоги перебувайте в безпечному місці. "
+      + ("* Перегляньте прикріплене відео до теми.\n" if video else "")
+      + "* Уважно опрацюйте прикріплений матеріал уроку.\n"
+      + ("* Виконайте завдання (до 3) з Word-документа: потрібну інформацію шукайте в інтернеті.\n"
+         "* ✍️ Відповіді можна записати в зошит і прикріпити фото, або виконати зручним способом "
+         "(Word, презентація, схема) і прикріпити до завдання в Classroom.\n\n"
+         if is_task_lesson(lesson.topic) else
+         "* Наприкінці Word-документа знайдіть «ПЛАН-КОНСПЕКТ УРОКУ ДЛЯ ЗАПИСУ В ЗОШИТ».\n"
+         "* ✍️ Запишіть лише цей план-конспект; всю лекцію переписувати не потрібно.\n\n")
+      + "❗ Під час повітряної тривоги перебувайте в безпечному місці. "
         "Жовта тривога також означає небезпеку. До навчання повертайтеся лише тоді, коли це безпечно.\n\n"
         "Бережіть себе!\n\n"
         f"Д/з: {lesson.homework or 'Не зазначено в календарному плані — уточнити у вчителя.'}")
 
+def _clean_part(text):
+    text=re.sub(r'[<>:"/\\|?*\u0000-\u001f]+',' ',str(text))
+    return re.sub(r'\s+',' ',text).strip(' .')
+
 def lesson_base_name(lesson:Lesson,limit=120):
-    """«Урок № 8, 02.10.2026 Тема» — назва, що говорить сама за себе."""
-    date_text=f"{lesson.day[8:10]}.{lesson.day[5:7]}.{lesson.day[:4]}"
-    head=f"Урок № {lesson.lesson_number}, {date_text} "
-    topic=re.sub(r'[<>:"/\\|?*\u0000-\u001f]+',' ',lesson.topic)
-    topic=re.sub(r'\s+',' ',topic).strip(' .')
+    """«9-Б ВІ, Урок 05.10 — Тема»: клас і дата на початку назви, щоб програма одразу розпізнала файл."""
+    head=f"{_clean_part(lesson.stream) or 'потік'}, Урок {lesson.day[8:10]}.{lesson.day[5:7]} — "
+    topic=_clean_part(lesson.topic)
     room=max(20,limit-len(head))
     if len(topic)>room:
         cut=topic[:room]
         topic=(cut.rsplit(' ',1)[0] if ' ' in cut[20:] else cut).rstrip(' .,;:—-')
-    return (head+topic).strip(' .')
+    return (head+topic).strip(' .—')
 
 def safe_name(lesson:Lesson):
     return lesson_base_name(lesson)+".docx"
 
 def word_path(lesson:Lesson):
-    """Готові Word/<дата>/<потік>/Урок № …docx — потік у папці, щоб імена не збігалися."""
-    stream=re.sub(r'[<>:"/\\|?*\u0000-\u001f]+',' ',lesson.stream)
-    stream=re.sub(r'\s+',' ',stream).strip(' .') or "потік"
-    return ROOT/"Готові Word"/lesson.day/stream/safe_name(lesson)
+    """Готові Word/<дата>/<клас, Урок дд.мм — тема>.docx (клас уже в назві, тож імена не збігаються)."""
+    return ROOT/"Готові Word"/lesson.day/safe_name(lesson)
 
 def read_state():
     path=DATA/"Стан.json"

@@ -225,7 +225,7 @@ class EditorBehaviourTests(TkCase):
             editor.add_holiday()
         self.assertEqual(len(editor.cfg["holidays"]), 2)
 
-    def test_combined_course_asks_which_subject_and_matches_classroom_meaning(self):
+    def test_combined_course_has_a_row_per_subject_and_the_file_goes_to_the_chosen_one(self):
         config = data_tools.blank_config()
         config["course_map"] = {"9-Б Право": {"plan": "p1", "course_title": "9-Б Право"},
                                 "9-Б ГО": {"plan": "p2", "course_title": "9-Б ГО"}}
@@ -235,23 +235,19 @@ class EditorBehaviourTests(TkCase):
         editor = self.make(config, plans)
         editor.parent.google_courses = [{"name": "9-Б Право + ГО", "id": "7"}]
         editor._refresh_planlist()
-        self.assertEqual([e["course"] for e in editor.list_entries], ["9-Б Право + ГО"])
-        self.assertEqual(editor.list_entries[0]["streams"], ["9-Б ГО", "9-Б Право"])
-        editor.planlist.selection_set(0)
+        self.assertEqual([e["label"] for e in editor.list_entries],
+                         ["9-Б Право + ГО  ▸ ГО   — без КТП", "9-Б Право + ГО  ▸ Право   — без КТП"])
+        self.assertEqual([e["streams"] for e in editor.list_entries], [["9-Б ГО"], ["9-Б Право"]])
+        self.assertEqual(editor.list_entries[0]["course_streams"], ["9-Б ГО", "9-Б Право"])
+        editor.planlist.selection_set(0)                                   # рядок «ГО»
         editor.plan_selected()
         with tempfile.TemporaryDirectory() as folder:
             ktp = Path(folder) / "ktp.docx"
             samples_ui.build_sample_ktp(ktp)
-            asked = []
-            def choose(title, prompt, options):
-                asked.append(options)
-                return "9-Б ГО"
-            with mock.patch.object(editor, "_ask_choice", choose):
+            with mock.patch.object(editor, "_ask_choice", side_effect=AssertionError("вибір не потрібен")):
                 editor.import_plan(path=ktp)
-        self.assertEqual(asked, [["9-Б ГО", "9-Б Право"]])
         self.assertEqual(len(editor.plans["p2"]["lessons"]), 5)
         self.assertEqual(editor.plans["p1"]["lessons"], [])
-
 
 class MainWindowFeatureTests(TkCase):
     NEEDS_ROOT = False
@@ -479,7 +475,8 @@ class WordClosingAndDataTests(unittest.TestCase):
                 result = material_library.copy_for_lesson(master, lesson)
             copy_doc = Document(result)
             self.assertEqual(copy_doc.sections[0].header.paragraphs[0].text, "ВСЕСВІТНЯ ІСТОРІЯ • 11 КЛАС • 09.10")
-            self.assertEqual([p.text for p in copy_doc.paragraphs if p.text.strip()][0], "Урок 09.10 — Тема")
+            self.assertEqual([p.text for p in copy_doc.paragraphs if p.text.strip()][0],
+                             f"{lesson.stream}, Урок 09.10 — Тема")
             self.assertEqual([p.text for p in copy_doc.paragraphs if p.text.strip()][-1], "Д/з: параграф 9")
 
     def test_clean_install_creates_blank_data_without_overwriting(self):

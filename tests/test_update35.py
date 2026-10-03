@@ -85,7 +85,8 @@ class NamingTests(unittest.TestCase):
 
     def test_name_says_everything(self):
         name = lesson_base_name(self.lesson)
-        self.assertEqual(name, f"Урок № {self.lesson.lesson_number}, 01.10.2026 {self.lesson.topic}"[:120].rstrip(" .,;:—-"))
+        self.assertEqual(name, f"{self.lesson.stream}, Урок 01.10 — {self.lesson.topic}".rstrip(" ."))
+        self.assertTrue(name.startswith("11 ІУ профіль, Урок 01.10 — "))             # клас і дата — на початку
         self.assertNotIn(":", name)
         self.assertNotIn("#", name)
 

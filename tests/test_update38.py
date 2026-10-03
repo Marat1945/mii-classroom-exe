@@ -217,8 +217,9 @@ class EditorKtpFlowTests(TkCase):
         api.ok()
         cmap = editor.cfg["course_map"]
         self.assertEqual(cmap["9-Б ГО"]["course_title"], "9-Б Право + ГО")
-        self.assertEqual(editor.list_entries[0]["streams"], ["9-Б ГО", "9-Б Право"])
-        self.assertEqual(len([e for e in editor.list_entries if e["course"] == "9-Б Право + ГО"]), 1)
+        rows = [e for e in editor.list_entries if e["course"] == "9-Б Право + ГО"]
+        self.assertEqual([e["streams"] for e in rows], [["9-Б ГО"], ["9-Б Право"]])     # окремий рядок на предмет
+        self.assertTrue(all(e["course_streams"] == ["9-Б ГО", "9-Б Право"] for e in rows))
         self.select(editor, "9-В ІУ")
         editor.edit_course(True)
         dialog = editor.winfo_children()[-1]

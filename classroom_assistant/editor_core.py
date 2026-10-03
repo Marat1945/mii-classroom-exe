@@ -398,6 +398,26 @@ def atomic_json_write(filename: str, data: dict):
         if Path(tmp).exists():Path(tmp).unlink()
 
 
+_LESSON_KEY=re.compile(r"^(\d{4}-\d{2}-\d{2}\|\d+\|)(.+)$")
+
+
+def migrate_stream_keys(state: dict, renames: dict) -> int:
+    """Перейменований потік: переносить Word, вкладення, чернетки й тексти на нову назву.
+
+    Ключ уроку — «РРРР-ММ-ДД|урок|потік», тож без цього після перейменування все збережене «загубилося» б.
+    """
+    moved=0
+    for value in list(state.values()):
+        if not isinstance(value,dict):continue
+        for key in list(value):
+            found=_LESSON_KEY.match(key) if isinstance(key,str) else None
+            if found and found.group(2) in renames:
+                new=found.group(1)+renames[found.group(2)]
+                if new not in value:
+                    value[new]=value.pop(key);moved+=1
+    return moved
+
+
 def persist(config: dict, plans: dict, state: dict, label="редагування")->Path:
     # Клас без КТП — не помилка: вчитель може завантажити КТП пізніше.
     errors=[e for e in validate_working(config,plans) if not e.startswith("Порожній КТП")]

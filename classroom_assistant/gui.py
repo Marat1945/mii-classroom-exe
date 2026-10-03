@@ -20,7 +20,7 @@ from .hotkeys import install_hotkeys
 from .theme import apply_theme, make_banner
 from .history import History, describe_change
 from .datepicker import pick_date
-from . import data_tools
+from . import data_tools, file_match
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
     WindowBase = TkinterDnD.Tk
@@ -83,6 +83,7 @@ class MainApp(WindowBase):
         self.remote_classroom_entries={}
         self._plans_sig=None;self._plans_digest="";self._plans_store={}
         self._build()
+        self._register_window_drop()
         self.update_day()
         self.history=History()
         self.history.reset(self._history_snapshot())
@@ -186,6 +187,7 @@ class MainApp(WindowBase):
         for title,callback in [
             ("Word: заготовка",lambda:self.make_word(False)),
             ("Вибрати готовий Word",self.choose_docx),
+            ("Word і картинки пачкою…",self.choose_lecture_files),
             ("Бібліотека Word",self.library_dialog),
             ("Папка Word",self.open_folder),
         ]:
@@ -773,20 +775,21 @@ class MainApp(WindowBase):
         return "copy"
 
     def _drop_on_lesson(self,event):
-        """Перетягнутий Word — готовий урок; інші файли — вкладення саме цього рядка."""
+        """Спершу клас + дата в назві файлу (будь-який урок); решта — до рядка, на який кинули."""
         self._clear_drop_lesson()
-        item=self.grid.identify_row(self.grid.winfo_pointery()-self.grid.winfo_rooty())
-        if not item:return "copy"
-        self.grid.selection_set(item);self.grid.focus(item)
-        lesson=self.rows[int(item)]
         try:paths=[Path(path) for path in self.tk.splitlist(event.data)]
         except (tk.TclError,ValueError):return "copy"
+        item=self.grid.identify_row(self.grid.winfo_pointery()-self.grid.winfo_rooty())
+        leftover=self.import_lecture_files(paths,report_unmatched=not item)
+        if not leftover or not item:return "copy"
+        self.grid.selection_set(item);self.grid.focus(item)
+        lesson=self.rows[int(item)]
         if lesson.unique_key in self.state.get("drafts",{}):
             messagebox.showwarning("Чернетка вже існує",
                   "Цей урок уже має чернетку. Додайте файли у Google Classroom.")
             return "copy"
-        docs=[path for path in paths if path.suffix.casefold()==".docx"]
-        others=[path for path in paths if path.suffix.casefold()!=".docx"]
+        docs=[path for path in leftover if path.suffix.casefold()==".docx"]
+        others=[path for path in leftover if path.suffix.casefold()!=".docx"]
         if docs:
             # Для двох Word немає однозначного головного документа — питаємо.
             if len(docs)>1:
@@ -913,6 +916,7 @@ class MainApp(WindowBase):
         menu.add_command(label="Лекції ГПТ на весь день…",command=self.chatgpt_batch)
         menu.add_command(label="Word: заготовка",command=lambda:self.make_word(False))
         menu.add_command(label="Вибрати готовий Word…",command=self.choose_docx)
+        menu.add_command(label="Word і картинки пачкою (за назвою)…",command=self.choose_lecture_files)
         menu.add_command(label="Бібліотека Word…",command=self.library_dialog)
         menu.add_command(label="Додати файли до Classroom…",command=self.choose_attachments)
         menu.add_command(label="Відкрити папку Word",command=self.open_folder)
@@ -1034,8 +1038,113 @@ class MainApp(WindowBase):
         except Exception:
             names=[]
         self._clear_description_drop()
-        self._attach_paths(names)
+        leftover=self.import_lecture_files(names,report_unmatched=False)    # розпізнані — за назвою
+        if leftover:self._attach_paths([str(p) for p in leftover])           # решта — до вибраного уроку
         return "copy"
+
+    # ---------- Word і зображення пачкою: урок визначається за назвою ----------
+    def _register_window_drop(self):
+        if not DND_FILES:return
+        self.window_hint=tk.Label(self,bg="#FFE49A",fg="#164F82",font=("Segoe UI",10,"bold"),
+            text="⬇  Відпустіть Word і зображення: програма знайде урок за назвою «9-Б ВІ, Урок 05.10 — Тема»")
+        special={id(w) for w in (self.grid,self.desc,self.drop_hint,self.attachment_bar,
+                                 self.attachment_toolbar)}
+        everything=[];stack=[self]
+        while stack:
+            widget=stack.pop();stack.extend(widget.winfo_children())
+            if id(widget) not in special and widget is not self.window_hint:everything.append(widget)
+        everything.append(self.window_hint)
+        for widget in everything:
+            try:
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<DropEnter>>",self._show_window_hint)
+                widget.dnd_bind("<<DropPosition>>",self._show_window_hint)
+                widget.dnd_bind("<<DropLeave>>",self._hide_window_hint)
+                widget.dnd_bind("<<Drop>>",self._drop_anywhere)
+            except tk.TclError:pass
+
+    def _show_window_hint(self,_event=None):
+        try:self.window_hint.place(x=0,y=0,relwidth=1,height=30);self.window_hint.lift()
+        except (AttributeError,tk.TclError):pass
+        return "copy"
+
+    def _hide_window_hint(self,_event=None):
+        try:self.window_hint.place_forget()
+        except (AttributeError,tk.TclError):pass
+        return "copy"
+
+    def _drop_anywhere(self,event):
+        self._hide_window_hint()
+        try:paths=[Path(p) for p in self.tk.splitlist(event.data)]
+        except (tk.TclError,ValueError):return "copy"
+        self.import_lecture_files(paths)
+        return "copy"
+
+    def choose_lecture_files(self):
+        paths=filedialog.askopenfilenames(title="Word і зображення (урок визначу за назвою)",
+            filetypes=[("Word та зображення","*.docx *.png *.jpg *.jpeg *.gif *.webp"),("Усі файли","*.*")])
+        if paths:self.import_lecture_files([Path(p) for p in paths])
+
+    def _extras_targets(self,lesson):
+        drafts=self.state.get("drafts",{})
+        targets=[x for x in self._parallel(lesson) if x.unique_key not in drafts]
+        if lesson.unique_key not in drafts and all(x.unique_key!=lesson.unique_key for x in targets):
+            targets.insert(0,lesson)
+        return targets
+
+    def import_lecture_files(self,paths,report_unmatched=True):
+        """Word і зображення за назвою «9-Б ВІ, Урок 05.10 — Тема» → відповідні уроки (і їхні паралелі).
+
+        Жодних запитань. Повертає файли, яких не розпізнано (якщо report_unmatched=False — без повідомлення).
+        """
+        paths=[Path(p) for p in paths if Path(p).is_file()]
+        if not paths:return []
+        lessons=[x for x in build_calendar(self.cfg) if x.status=="готово"]
+        groups={};unmatched=[]
+        for path in paths:
+            kind=file_match.kind_of(path)
+            first=file_match.first_line_of_docx(path) if kind=="word" else ""
+            lesson=file_match.find_lesson(lessons,file_match.parse_file(path,first))
+            if lesson is None:
+                unmatched.append(path);continue
+            group=groups.setdefault(lesson.unique_key,{"lesson":lesson,"word":[],"extra":[]})
+            group["word" if kind=="word" else "extra"].append(path)
+        done=[];failed=[]
+        for group in groups.values():
+            lesson=group["lesson"];title=f"{lesson.stream}, {lesson.day[8:10]}.{lesson.day[5:7]}"
+            files=group["word"]+group["extra"]
+            if lesson.unique_key in self.state.get("drafts",{}):
+                failed.append(f"✗ {title}: чернетка вже створена — додайте файли у Google Classroom");continue
+            try:
+                if group["word"]:
+                    main=max(group["word"],key=lambda p:p.stat().st_mtime)        # найновіший Word
+                    _dest,attached,skipped=self.save_dropped_lecture(
+                        lesson,main,group["extra"],replace_existing=True)
+                    note="Word"+(f" + зображень: {len(group['extra'])}" if group["extra"] else "")
+                    also=[x.stream for x in attached if x.unique_key!=lesson.unique_key]
+                    if also:note+="; також для: "+", ".join(dict.fromkeys(also))
+                    if len(group["word"])>1:note+="; з кількох Word взято найновіший"
+                    if skipped:note+="; "+skipped
+                else:
+                    targets=self._extras_targets(lesson)
+                    for target in targets:add_attachments(self.state,target.unique_key,group["extra"])
+                    note=f"зображень/файлів: {len(group['extra'])} (без Word)"
+                done.append(f"✓ {title} — {note}")
+            except Exception as ex:
+                failed.append(f"✗ {title}: {ex}")
+        save_state(self.state);self.update_day();self.refresh_attachment_previews()
+        if unmatched and report_unmatched:
+            failed+=[f"✗ {p.name} — не вдалося визначити урок: у назві має бути «9-Б ВІ, Урок 05.10 — Тема»"
+                     for p in unmatched]
+        if done or failed:
+            if len(done)==1 and not failed:
+                self.foot.config(text=done[0])
+            else:
+                text=(f"Розпізнано уроків: {len(done)}. Файлів: {len(paths)-len(unmatched)} з {len(paths)}."
+                      "\n\n"+"\n".join((done+failed)[:30]))
+                text+="\n\nУ Classroom нічого не створено: файли додаються до чернетки при її створенні."
+                (messagebox.showwarning if failed else messagebox.showinfo)("Word і зображення",text)
+        return [] if report_unmatched else unmatched
 
     def choose_attachments(self):
         if not self.selected():return

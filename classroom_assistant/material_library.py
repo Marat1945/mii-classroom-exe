@@ -158,8 +158,9 @@ def copy_for_lesson(master,lesson):
     output.parent.mkdir(parents=True,exist_ok=True)
     doc=Document(source)
     date_ddmm=lesson.day[8:10]+"."+lesson.day[5:7]
-    heading=f"Урок {date_ddmm} — {lesson.topic}"
-    regular=re.compile(r"^Урок\s+\d{2}\.\d{2}(?:\.\d{4})?\s*[—–-]",re.I)
+    heading=f"{lesson.stream}, Урок {date_ddmm} — {lesson.topic}"
+    # Перший рядок: «9-Б ВІ, Урок 05.10 — Тема» (новий) або «Урок 05.10 — Тема» (старі Word).
+    regular=re.compile(r"^(?:.{1,40}?,\s*)?Урок\s+\d{1,2}\.\d{2}(?:\.\d{4})?\s*[—–-]",re.I)
     found_title=False
     date_full=lesson.day[8:10]+"."+lesson.day[5:7]+"."+lesson.day[:4]
     info_strip=re.compile(r"^Урок\s*№\s*\d+\s*[•·|\-–—]",re.I)
