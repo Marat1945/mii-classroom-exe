@@ -173,16 +173,18 @@ def sync_everything(titles,known_ids,progress=None):
     for title,course in match_titles([t for t in titles if t not in mapped],courses).items():
         mapped[title]=str(course["id"])
     classroom,drive=services()
-    entries={};errors=[]
+    entries={};errors=[];truncated={}
     unique=list(dict.fromkeys(mapped.values()))
     names={cid:t for t,cid in mapped.items()}
     for number,cid in enumerate(unique,1):
         say(f"Синхронізація з Classroom: {names.get(cid,cid)} ({number}/{len(unique)})…")
         try:
-            entries[cid]=list_classroom_posts(cid,service=(classroom,drive))["items"]
+            posts=list_classroom_posts(cid,service=(classroom,drive))
+            entries[cid]=posts["items"]
+            if posts.get("truncated"):truncated[cid]=posts["truncated"]     # список неповний — не звіряти
         except Exception as ex:
             errors.append(f"{names.get(cid,cid)}: {ex}")
-    return {"courses":courses,"mapped":mapped,"entries":entries,"errors":errors,
+    return {"courses":courses,"mapped":mapped,"entries":entries,"errors":errors,"truncated":truncated,
             "unmapped":[t for t in titles if t not in mapped]}
 
 

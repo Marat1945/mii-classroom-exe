@@ -349,7 +349,7 @@ class MainWindowFeatureTests(TkCase):
                 mock.patch.object(app, "sync_classroom") as sync:
             app.connect_google()
         wizard.assert_not_called()
-        sync.assert_called_once_with(interactive=True)
+        sync.assert_called_once_with(interactive=True, announce=True)
 
     def test_clean_start_runs_once_with_a_backup_and_never_repeats(self):
         app = self.make()
@@ -435,7 +435,7 @@ class GoogleWizardTests(TkCase):
             with mock.patch.object(google_client, "authenticate", fake_authenticate):
                 wizard.login()
                 pump(self.root, 0.8)
-            self.assertEqual(calls, [{"interactive": True}])
+            self.assertEqual(calls, [{"interactive": True, "announce": True}])
 
 
 class WordClosingAndDataTests(unittest.TestCase):

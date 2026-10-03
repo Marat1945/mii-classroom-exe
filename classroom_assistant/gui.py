@@ -56,8 +56,8 @@ def render_template(text,lesson):
 
 
 # Ці ключі стану не відкочуються кнопкою «Назад»: чернетки Google вже створено, курси — з Google.
-NON_UNDOABLE=("drafts","course_ids","classroom_order","chatgpt_url","autopaste","autosend",
-              "autopaste_delay","column_order","blank_offer_37")
+NON_UNDOABLE=("drafts","drafts_removed","course_ids","classroom_order","chatgpt_url","autopaste","autosend",
+              "autopaste_delay","column_order","blank_offer_37","watch_downloads","watch_inbox","inbox_done")
 
 WEEKDAYS_UA=("ПОНЕДІЛОК","ВІВТОРОК","СЕРЕДА","ЧЕТВЕР","П’ЯТНИЦЯ","СУБОТА","НЕДІЛЯ")
 
@@ -88,6 +88,7 @@ class MainApp(WindowBase):
         self._plans_sig=None;self._plans_digest="";self._plans_store={}
         self._build()
         self._register_window_drop()
+        self._refresh_google_button()
         self.update_day()
         self.history=History()
         self.history.reset(self._history_snapshot())
@@ -97,6 +98,7 @@ class MainApp(WindowBase):
         self.after(1500,lambda:self.sync_classroom(interactive=False))
         self.after(2600,self._clean_start_once)
         self.protocol("WM_DELETE_WINDOW",self.on_close)
+        self.bind("<FocusIn>",self._on_focus_in,add="+")
         self._watcher=lecture_inbox.InboxWatcher(self.state.get("inbox_done"))
         self._watch_since_ns=time.time_ns()-6*3600*10**9
         self._inbox_job=self.after(2500,self._inbox_poll)
@@ -124,7 +126,8 @@ class MainApp(WindowBase):
         hdr.add(ttk.Button(hdr,text="ПОЧАТКОВЕ НАЛАШТУВАННЯ",command=self.setup_dialog),padx=6)
         self.phase=ttk.Label(hdr,text="",font=("Segoe UI",11,"bold"))
         hdr.add(self.phase,padx=8)
-        hdr.add(ttk.Button(hdr,text="Підключити Google",command=self.connect_google),padx=3)
+        self.google_button=ttk.Button(hdr,text="Підключити Google",command=self.connect_google)
+        hdr.add(self.google_button,padx=3)
         self.undo_button=ttk.Button(hdr,text="↶ Назад",command=self.undo,state="disabled")
         hdr.add(self.undo_button,padx=2,right=True)
         self.redo_button=ttk.Button(hdr,text="↷ Вперед",command=self.redo,state="disabled")
@@ -290,7 +293,9 @@ class MainApp(WindowBase):
             if item and not remote:
                 cid=str(self.state.get("course_ids",{}).get(adjusted.course_title,""))
                 created=float(item.get("created_at",0) or 0) if isinstance(item,dict) else 0.0
-                if cid in self.remote_classroom_entries and self._last_sync_ts>created:
+                if created and time.time()-created<150:
+                    status="Створено в Google · перевіряю Classroom…"            # щойно створено
+                elif cid in self.remote_classroom_entries and self._last_sync_ts>created:
                     status="Створено в Google · у Classroom не знайдено"          # перевірено, але не бачу
             if remote:
                 # Не показувати «чернетка», якщо Google повідомляє PUBLISHED!
@@ -528,9 +533,8 @@ class MainApp(WindowBase):
         if reused:
             save_state(self.state);self.update_day()
         if not pending:
-            messagebox.showinfo("Лекції за день",
-                "Усі уроки цього дня вже мають Word"
-                +(f" (з бібліотеки прив'язано: {reused})." if reused else "."))
+            show_toast(self,"✓ Усі уроки цього дня вже мають Word"
+                       +(f" (з бібліотеки прив'язано: {reused})" if reused else ""),2400)
             return
         names="\n".join(f"• {x.period}-й урок — {x.stream}: {x.topic[:70]}" for x in pending)
         if not messagebox.askyesno("Лекції за день через ChatGPT",
@@ -1656,16 +1660,31 @@ class MainApp(WindowBase):
                     "файл КТП на клас: програма сама визначить, кому він підходить.")
         return "Теми в КТП завершилися або план не перевірено."
 
+    def _refresh_google_button(self):
+        """Підпис кнопки показує стан: «✓ Google підключено» або «Підключити Google»."""
+        from . import google_client
+        try:ready=bool(google_client.token_ready())
+        except Exception:ready=False
+        try:
+            self.google_button.config(text="✓ Google підключено" if ready else "Підключити Google")
+            row=self.google_button.master                      # підпис змінив ширину: перерахувати рядок шапки
+            row.after_idle(row._layout)
+        except (AttributeError,tk.TclError):pass
+
     def connect_google(self):
-        """Перший раз — покрокова інструкція з підключення; далі — лише оновлення з Classroom."""
+        """Перший раз — покрокова інструкція; далі — оновлення з Classroom з короткою відповіддю на екрані."""
         from . import google_client
         if google_client.token_ready():
-            self.sync_classroom(interactive=True)
+            if self._sync_running:
+                show_toast(self,"Оновлення Classroom уже триває…",1800)
+                return
+            show_toast(self,"✓ Google уже підключено · оновлюю дані Classroom…",2200)
+            self.sync_classroom(interactive=True,announce=True)
             return
         from .google_setup_ui import show_google_wizard
         show_google_wizard(self)
 
-    def sync_classroom(self,interactive=False,manual=False):
+    def sync_classroom(self,interactive=False,manual=False,announce=False):
         """Курси (у порядку Classroom) + стан усіх наявних матеріалів. Лише читання."""
         if self._sync_running:return
         from . import google_client
@@ -1675,6 +1694,7 @@ class MainApp(WindowBase):
                 messagebox.showinfo("Google","Спочатку натисніть «Підключити Google».")
             return
         self._sync_running=True
+        self._sync_started=time.time()
         titles=list(self.cfg.get("classroom_course_titles",[]))
         known=dict(self.state.get("course_ids",{}))
         def progress(text):
@@ -1682,7 +1702,7 @@ class MainApp(WindowBase):
         def run():
             try:
                 result=google_client.sync_everything(titles,known,progress)
-                self.after(0,lambda:self._sync_done(result,interactive))
+                self.after(0,lambda:self._sync_done(result,interactive,announce))
             except Exception as ex:
                 text=str(ex)
                 self.after(0,lambda:self._sync_failed(text,interactive))
@@ -1701,6 +1721,46 @@ class MainApp(WindowBase):
         try:write_json("Налаштування.json",self.cfg)
         except OSError:pass
 
+    def _reconcile_drafts(self,result):
+        """Чернетка, яку створила програма, але яку потім видалили в Classroom, більше не вважається «створеною».
+
+        Прибираємо запис лише коли: курс щойно ПОВНІСТЮ прочитано, id цієї чернетки там відсутній, а сама вона
+        не свіжа (старша за 2 хв — Classroom оновлюється з затримкою). Без id чи за неповного списку не чіпаємо.
+        """
+        fresh=result.get("entries",{});cut=result.get("truncated",{})
+        started=float(getattr(self,"_sync_started",0) or 0) or time.time()
+        drafts=self.state.get("drafts",{})
+        gone=[]
+        for key,record in list(drafts.items()):
+            if not isinstance(record,dict):continue
+            try:
+                stream=key.split("|",2)[2]
+                title=self.cfg["course_map"][stream]["course_title"]
+            except (IndexError,KeyError,TypeError):
+                continue
+            cid=str(self.state.get("course_ids",{}).get(title,""))
+            own_id=str(record.get("id") or "")
+            if not cid or cid not in fresh or cut.get(cid) or not own_id:continue
+            if any(str(row.get("id"))==own_id for row in fresh[cid]):continue
+            created=float(record.get("created_at",0) or 0)
+            if created and created>started-120:continue
+            gone.append((key,own_id))
+        log=self.state.setdefault("drafts_removed",[]) if gone else None
+        for key,own_id in gone:
+            drafts.pop(key,None)
+            log.append({"key":key,"id":own_id,"removed_at":time.time(),"reason":"немає в Classroom"})
+        if log is not None:del log[:-200]
+        return [key for key,_ in gone]
+
+    def _on_focus_in(self,event=None):
+        """Повернулися у програму (з браузера, де щось змінили в Classroom): оновити стан, не частіше ніж раз на хвилину."""
+        try:
+            if event is not None and event.widget is not self:return
+            if self._sync_running or time.time()-self._last_sync_ts<60:return
+            from . import google_client
+            if google_client.token_ready():self.request_sync(400)
+        except Exception:pass
+
     def request_sync(self,delay=900):
         """Перевірити Classroom після змін (чернетки, розклад): якщо синхронізація йде — повторити по завершенню."""
         def go():
@@ -1713,7 +1773,7 @@ class MainApp(WindowBase):
             self._sync_again=False
             self.after(300,lambda:self.sync_classroom(interactive=False))
 
-    def _sync_done(self,result,interactive):
+    def _sync_done(self,result,interactive,announce=False):
         self._sync_running=False
         self._last_sync_ts=time.time()
         self.google_courses=result["courses"]
@@ -1721,9 +1781,13 @@ class MainApp(WindowBase):
         self.state["classroom_order"]=[c["name"] for c in result["courses"]]
         self._link_courses_automatically(result["courses"])
         self.remote_classroom_entries.update(result["entries"])
+        removed=self._reconcile_drafts(result)
         try:save_state(self.state)
         except Exception:pass
         self.update_day()
+        if removed:
+            show_toast(self,f"Чернеток, яких уже немає в Classroom, прибрано зі стану: {len(removed)} · "
+                            "їх можна створити знову",3600)
         records=sum(len(v) for v in result["entries"].values())
         text=(f"Classroom синхронізовано: курсів — {len(result['courses'])}, "
               f"записів — {records}.")
@@ -1732,8 +1796,14 @@ class MainApp(WindowBase):
         if result["errors"]:
             text+=f" Не вдалося прочитати курсів: {len(result['errors'])}."
         self.foot.config(text=text)
-        if interactive and (result["errors"] or result["unmapped"]):
-            messagebox.showinfo("Google Classroom",text+("\n\n"+"\n".join(result["errors"][:5]) if result["errors"] else ""))
+        self._refresh_google_button()
+        if interactive and result["errors"]:
+            messagebox.showinfo("Google Classroom",text+"\n\n"+"\n".join(result["errors"][:5]))     # треба прочитати
+        elif announce and result["unmapped"]:
+            show_toast(self,f"Classroom оновлено · не зіставлено курсів: {len(result['unmapped'])} "
+                            "(кнопка «Зіставити курси»)",4000,"warn")
+        elif announce:
+            show_toast(self,f"✓ Classroom оновлено: курсів — {len(result['courses'])}, записів — {records}",2600)
         self._after_sync()
 
     def _sync_failed(self,error,interactive):

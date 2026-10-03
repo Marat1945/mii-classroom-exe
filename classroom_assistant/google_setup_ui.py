@@ -208,7 +208,7 @@ class GoogleWizard(tk.Toplevel):
             self.destroy()
         except tk.TclError:
             pass
-        self.app.sync_classroom(interactive=True)
+        self.app.sync_classroom(interactive=True,announce=True)
 
 
 def show_google_wizard(app):
