@@ -162,8 +162,9 @@ def _show_background_menu(event):
 
 def install_hotkeys(root):
     """Один раз на програму: гарячі клавіші, Esc для діалогів, меню для полів."""
-    from . import dragselect
+    from . import dragselect, wheel
     dragselect.install(root)
+    wheel.install(root)
     root.bind_all("<Control-KeyPress>",_on_control_key,add="+")
     root.bind_all("<Escape>",_on_escape,add="+")
     for cls in ("Entry","TEntry","TCombobox","Text","Spinbox"):

@@ -58,7 +58,7 @@ class ResetThenBackTests(TkCase):
             mock.patch.object(data_tools, "reset_to_blank",
                               lambda z, **k: real_reset(z, root=root, data_dir=root / "data")),
             mock.patch.object(data_tools, "restore_from_zip", lambda z, s, **k: real_restore(z, s, root=root)),
-            mock.patch.object(data_tools, "auto_backup_path", lambda p, **k: real_auto(p, root=root)),
+            mock.patch.object(data_tools, "auto_backup_path", lambda p, *a, **k: real_auto(p, root=root)),
             mock.patch.object(data_tools, "latest_backup", lambda *a, **k: real_latest(root=root)),
         ]
 
@@ -164,11 +164,12 @@ class ResetThenBackTests(TkCase):
                     mock.patch.object(samples_ui.messagebox, "askyesno", return_value=True), \
                     mock.patch.object(samples_ui.messagebox, "showinfo"), \
                     mock.patch.object(samples_ui.filedialog, "asksaveasfilename",
-                                      return_value=str(copy)), \
+                                      side_effect=AssertionError("питати, куди зберегти, не треба")), \
                     mock.patch.object(samples_ui.filedialog, "askopenfilename", return_value=str(copy)):
                 press("Почати з порожньої програми")
                 self.assertEqual(app.cfg["course_map"], {})
-                self.assertTrue(copy.exists() and not word.exists())
+                self.assertFalse(word.exists())
+                self.assertEqual(len(list((root / "Резервні копії").glob("Копія перед скиданням*.zip"))), 1)
                 app.undo()                                      # «Назад» у головному вікні
                 self.assertTrue(word.exists())
                 self.assertIn("8-Б ІУ", app.cfg["course_map"])

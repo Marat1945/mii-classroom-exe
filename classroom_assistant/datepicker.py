@@ -79,6 +79,9 @@ class CalendarDialog(tk.Toplevel):
         except tk.TclError:
             pass
         self.bind("<Escape>", lambda _e: self.destroy())
+        from . import wheel                                   # коліщатко: місяць; Shift/Ctrl — рік
+        for target in (self, self.body):
+            wheel.bind_steps(target, lambda step, big: self._move(step * (12 if big else 1)))
 
     def _move(self, delta):
         self.year, self.month = shift_month(self.year, self.month, delta)

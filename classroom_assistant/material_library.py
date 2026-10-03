@@ -150,7 +150,7 @@ def _fix_header_dates(doc,lesson):
                 if updated!=paragraph.text:_change_text(paragraph,updated)
 
 
-def copy_for_lesson(master,lesson):
+def copy_for_lesson(master,lesson,label=None):
     """Окрема Word-копія для дати/ДЗ; оригінал не змінюється."""
     source=Path(master)
     check_real_docx(source)
@@ -158,7 +158,7 @@ def copy_for_lesson(master,lesson):
     output.parent.mkdir(parents=True,exist_ok=True)
     doc=Document(source)
     date_ddmm=lesson.day[8:10]+"."+lesson.day[5:7]
-    heading=f"{lesson.stream}, Урок {date_ddmm} — {lesson.topic}"
+    heading=f"{label or lesson.stream}, Урок {date_ddmm} — {lesson.topic}"
     # Перший рядок: «9-Б ВІ, Урок 05.10 — Тема» (новий) або «Урок 05.10 — Тема» (старі Word).
     regular=re.compile(r"^(?:.{1,40}?,\s*)?Урок\s+\d{1,2}\.\d{2}(?:\.\d{4})?\s*[—–-]",re.I)
     found_title=False
@@ -184,8 +184,13 @@ def copy_for_lesson(master,lesson):
         doc.save(output)
     return output
 
-def attach_document(item,lessons,state,replace_existing=False):
-    """Автоприв'язка, але НІКОЛИ не переписує матеріали, для яких є чернетка."""
+def attach_document(item,lessons,state,replace_existing=False,primary=None):
+    """Автоприв'язка, але НІКОЛИ не переписує матеріали, для яких є чернетка.
+
+    primary — урок, для якого Word створено; для паралелей в інші дні запам'ятовуємо, звідки він
+    («наперед з 8-Б ГО, 05.10»), щоб учитель це бачив у програмі.
+    """
+    from .engine import same_day_label
     outcome=[]
     for lesson in lessons:
         key=lesson.unique_key
@@ -195,9 +200,11 @@ def attach_document(item,lessons,state,replace_existing=False):
         if current and current.get("validated") and Path(current["path"]).is_file():
             # Retain confirmed material unless the teacher deliberately chose a replacement.
             if not replace_existing:continue
-        new_path=copy_for_lesson(item["path"],lesson)
-        state.setdefault("files",{})[key]={
-            "path":str(new_path),"validated":True,"complete":True,"library_id":item["id"],
-        }
+        new_path=copy_for_lesson(item["path"],lesson,label=same_day_label(lesson,lessons))
+        entry={"path":str(new_path),"validated":True,"complete":True,"library_id":item["id"]}
+        if primary is not None and lesson.day!=primary.day:
+            entry["from"]=f"{primary.stream}, {primary.day[8:10]}.{primary.day[5:7]}"
+            entry["ahead"]=lesson.day>primary.day
+        state.setdefault("files",{})[key]=entry
         outcome.append(lesson)
     return outcome

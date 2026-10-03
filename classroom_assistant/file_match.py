@@ -28,6 +28,17 @@ class Parsed:
     number: int | None = None
 
 
+COMBINED = re.compile(r"^(?P<grade>\d{1,2})-(?P<letters>[А-ЯІЇЄҐ](?:-[А-ЯІЇЄҐ])+)\s+(?P<rest>.+)$")
+
+
+def expand_stream(label: str) -> list:
+    """«8-Б-В-Г ГО» → ['8-Б ГО', '8-В ГО', '8-Г ГО']; звичайна назва лишається як є."""
+    found = COMBINED.match(str(label).strip())
+    if not found:
+        return [str(label).strip()]
+    return [f"{found['grade']}-{letter} {found['rest']}" for letter in found["letters"].split("-")]
+
+
 def kind_of(path) -> str:
     suffix = Path(path).suffix.lower()
     if suffix == ".docx":
@@ -90,11 +101,15 @@ def find_lesson(lessons, parsed):
     same_day = [x for x in lessons
                 if int(x.day[5:7]) == parsed.month and int(x.day[8:10]) == parsed.day]
     if parsed.stream:
-        pool = [x for x in same_day if norm(x.stream) == norm(parsed.stream)]
+        names = expand_stream(parsed.stream)
+        combined = len(names) > 1
+        pool = [x for x in same_day if any(norm(x.stream) == norm(n) for n in names)]
         if not pool:
-            pool = [x for x in same_day if score(x.stream, parsed.stream) >= 90]
+            pool = [x for x in same_day if any(score(x.stream, n) >= 90 for n in names)]
         if len(pool) > 1:                                  # подвійний урок: розрізняє тема
             pool = [x for x in pool if _topic_agrees(x, parsed)]
+        if combined and len(pool) > 1:                     # спільний урок кількох класів: головний — найраніший
+            return min(pool, key=lambda x: (x.period, x.stream))
     else:                                                  # клас не названо — лише якщо тема однозначна
         pool = [x for x in same_day if _topic_agrees(x, parsed)]
         if parsed.number is not None:

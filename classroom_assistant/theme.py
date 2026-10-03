@@ -106,7 +106,7 @@ def apply_theme(root):
     return True
 
 
-def make_banner(parent, title, subtitle=""):
+def make_banner(parent, title, subtitle="", author=""):
     """Шапка з плавним градієнтом і назвою програми."""
     height = 52
     canvas = tk.Canvas(parent, height=height, highlightthickness=0, bd=0)
@@ -126,6 +126,8 @@ def make_banner(parent, title, subtitle=""):
         if subtitle:
             canvas.create_text(22, 39, anchor="w", text=subtitle, fill="#D6E7F7",
                                font=(FONT, 9))
+        if author:                                           # під хрестиком закриття вікна
+            canvas.create_text(width - 18, 39, anchor="e", text=author, fill="#E3EEF9", font=(FONT, 9, "bold"))
         canvas.create_line(0, height - 1, width, height - 1, fill=ACCENT_DARK)
 
     canvas.bind("<Configure>", draw)

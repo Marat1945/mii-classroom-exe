@@ -16,7 +16,7 @@ from .engine import DATA, ROOT
 
 SKIP_DIRS = {".git", ".github", "classroom_assistant", "tests", "__pycache__", "build", "dist",
              "venv", ".venv", ".pytest_cache", "Резервні копії"}
-SECRET_NAMES = {"google_credentials.json", "credentials.json", "token.json"}
+SECRET_NAMES = {"google_credentials.json", "credentials.json", "token.json", "install_state.json"}
 # Що вважається «даними вчителя» і очищується разом із розкладом та КТП.
 WIPE_DIRS = ("Готові Word", "Вкладення Classroom", "Бібліотека уроків")
 RESTORE_DIRS = WIPE_DIRS + ("data", "Архів навчальних даних", "КТП джерела")
@@ -64,8 +64,16 @@ def reset_to_blank(backup_zip, root: Path = ROOT, data_dir: Path | None = None) 
     _write_json(data_dir / "Налаштування.json", blank_config(keep=old))
     _write_json(data_dir / "Календарні плани.json", {})
     state = data_dir / "Стан.json"
+    kept = {}
     if state.exists():
+        try:
+            previous = json.loads(state.read_text(encoding="utf-8"))
+            kept = {k: previous[k] for k in KEEP_STATE_KEYS if isinstance(previous, dict) and k in previous}
+        except (OSError, ValueError):
+            kept = {}
         state.unlink()
+    if kept:                                    # налаштування вікна й GPT не губляться при «Скинути все»
+        _write_json(state, kept)
     for name in WIPE_DIRS:
         folder = root / name
         if folder.is_dir():
@@ -105,6 +113,30 @@ def restore_from_zip(zip_path, safety_zip, root: Path = ROOT) -> int:
             with archive.open(info) as source, open(target, "wb") as out:
                 shutil.copyfileobj(source, out)
     return len(planned)
+
+
+INSTALL_FILE = "install_state.json"
+CLEAN_START_RELEASE = "4.3"            # випуск, у якому один раз виконується «чистий старт»
+KEEP_STATE_KEYS = ("chatgpt_url", "autopaste", "autosend", "autopaste_delay", "column_order",
+                   "watch_downloads", "watch_inbox", "inbox_done")
+
+
+def read_install(data_dir: Path | None = None) -> dict:
+    """Службова мітка встановлення: не копіюється й не відновлюється з архівів (тож чистий старт не повторюється)."""
+    path = (data_dir or DATA) / INSTALL_FILE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_install(values: dict, data_dir: Path | None = None) -> None:
+    folder = data_dir or DATA
+    folder.mkdir(parents=True, exist_ok=True)
+    current = read_install(folder)
+    current.update(values)
+    (folder / INSTALL_FILE).write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 BACKUP_FOLDER = "Резервні копії"

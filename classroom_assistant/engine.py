@@ -186,9 +186,27 @@ def _clean_part(text):
     text=re.sub(r'[<>:"/\\|?*\u0000-\u001f]+',' ',str(text))
     return re.sub(r'\s+',' ',text).strip(' .')
 
-def lesson_base_name(lesson:Lesson,limit=120):
+ALPHABET="АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ"
+_CLASS_STREAM=re.compile(r"^(\d{1,2})-([А-ЯІЇЄҐ])\s+(.+)$")
+
+def combined_label(streams):
+    """['8-Б ГО','8-В ГО','8-Г ГО'] → '8-Б-В-Г ГО'. Різні предмети чи рівні не склеюються."""
+    unique=list(dict.fromkeys(streams))
+    if len(unique)<2:return unique[0] if unique else ""
+    parsed=[_CLASS_STREAM.match(s) for s in unique]
+    if any(p is None for p in parsed):return unique[0]
+    if len({p.group(1) for p in parsed})!=1 or len({p.group(3) for p in parsed})!=1:return unique[0]
+    letters=sorted({p.group(2) for p in parsed},key=ALPHABET.index)
+    return f"{parsed[0].group(1)}-{'-'.join(letters)} {parsed[0].group(3)}"
+
+def same_day_label(lesson,parallels):
+    """Класи, у яких ЦЕЙ САМИЙ урок відбувається в ТОЙ САМИЙ день: «8-Б-В-Г ГО» (інакше — власний клас)."""
+    streams=sorted({x.stream for x in parallels if x.day==lesson.day}|{lesson.stream})
+    return combined_label(streams)
+
+def lesson_base_name(lesson:Lesson,limit=120,label=None):
     """«9-Б ВІ, Урок 05.10 — Тема»: клас і дата на початку назви, щоб програма одразу розпізнала файл."""
-    head=f"{_clean_part(lesson.stream) or 'потік'}, Урок {lesson.day[8:10]}.{lesson.day[5:7]} — "
+    head=f"{_clean_part(label or lesson.stream) or 'потік'}, Урок {lesson.day[8:10]}.{lesson.day[5:7]} — "
     topic=_clean_part(lesson.topic)
     room=max(20,limit-len(head))
     if len(topic)>room:

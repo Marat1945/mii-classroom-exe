@@ -18,6 +18,7 @@ from .chatgpt_bridge import (DEFAULT_CHATGPT_URL, best_lesson_for_file, build_pr
                              safe_chatgpt_url)
 from .ui_kit import AccentButton
 from . import autopaste
+from .toast import show_toast
 try:
     from tkinterdnd2 import DND_FILES
 except ImportError:
@@ -135,6 +136,8 @@ class ChatGPTLectureDialog(tk.Toplevel):
 
         self.status = ttk.Label(outer, text="", wraplength=940, justify="left")
         self.status.pack(anchor="w", pady=(8, 4))
+        self.state_label = ttk.Label(outer, text="", foreground="#2E6B30", font=("Segoe UI", 10, "bold"))
+        self.state_label.pack(anchor="w", pady=(0, 4))
         buttons = ttk.Frame(outer)
         buttons.pack(fill="x")
         self.create_button = ttk.Button(buttons, text="✅ Прикріпити до уроку",
@@ -218,7 +221,7 @@ class ChatGPTLectureDialog(tk.Toplevel):
             plan_lessons = None
         self._plan_lessons = plan_lessons
         self.prompt.delete("1.0", "end")
-        self.prompt.insert("1.0", build_prompt(lesson, plan_lessons, self.mode))
+        self.prompt.insert("1.0", build_prompt(lesson, plan_lessons, self.mode, label=_label_for(self.app, lesson)))
         self.answer.delete("1.0", "end")
         self.answer.edit_modified(False)
         self.clear_files()
@@ -248,7 +251,8 @@ class ChatGPTLectureDialog(tk.Toplevel):
         self.mode_button.config(text="Основний запит: файли" if self.mode == "text"
                                 else "Запасний запит: текстом")
         self.prompt.delete("1.0", "end")
-        self.prompt.insert("1.0", build_prompt(self.lesson, getattr(self, "_plan_lessons", None), self.mode))
+        self.prompt.insert("1.0", build_prompt(self.lesson, getattr(self, "_plan_lessons", None), self.mode,
+                                               label=_label_for(self.app, self.lesson)))
         self._set_status("Запасний запит: ChatGPT відповість ТЕКСТОМ; скопіюйте відповідь — "
                          "вона з'явиться нижче сама." if self.mode == "text" else
                          "Основний запит: ChatGPT має видати готовий Word і одну картинку.", "#1F4E79")
@@ -445,8 +449,27 @@ class ChatGPTLectureDialog(tk.Toplevel):
                         self.answer.edit_modified(False)
                         self.evaluate()
         finally:
+            self._refresh_attached_state()
             if not self._closing:
                 self._poll_job = self.after(self.POLL_MS, self._poll_clipboard)
+
+    def _refresh_attached_state(self):
+        """Файли, що самі прийшли з папки «Вхідні файли GPT» чи «Завантажень», одразу видно тут."""
+        lesson = self.lesson
+        try:
+            if lesson is None:
+                return
+            entry = self.app.state.get("files", {}).get(lesson.unique_key, {})
+            if entry.get("complete") and Path(entry.get("path", "")).is_file():
+                from .attachments import files_for_lesson
+                pictures = len(files_for_lesson(self.app.state, lesson.unique_key))
+                self.state_label.config(text="✅ Word цього уроку вже в програмі"
+                                        + (f" · вкладень: {pictures}" if pictures else "")
+                                        + (f" · {entry['from']}" if entry.get("from") else ""))
+            else:
+                self.state_label.config(text="")
+        except (tk.TclError, AttributeError):
+            pass
 
     def _create_from_files(self):
         lesson = self.lesson
@@ -474,8 +497,13 @@ class ChatGPTLectureDialog(tk.Toplevel):
             self.position += 1
             self.show_current()
         else:
-            messagebox.showinfo("Лекцію прикріплено", note + "\n\nУ Classroom нічого не створено. "
-                                "Відкрийте Word і перевірте факти перед чернеткою.", parent=self)
+            pictures = len(self.dropped_images)
+            if own:
+                show_toast(self.app, f"✓ {lesson.stream}: Word" + (f" + зображень: {pictures}" if pictures else "")
+                           + f" прикріплено (уроків: {len(attached)}) · у Classroom нічого не створено", 2600)
+            else:
+                messagebox.showwarning("Лекцію прикріплено", note, parent=self)
+            self.app.request_sync(1200)
             self.close()
 
     def create_word(self):
@@ -516,9 +544,12 @@ class ChatGPTLectureDialog(tk.Toplevel):
             self.position += 1
             self.show_current()
         else:
-            messagebox.showinfo("Лекцію створено", note + "\n\nУ Classroom нічого не створено. "
-                                "Відкрийте Word і перевірте факти, дату та Д/з перед чернеткою.",
-                                parent=self)
+            if own:
+                show_toast(self.app, f"✓ {lesson.stream}: Word створено (уроків: {len(attached)}) · "
+                                     "перевірте факти й Д/з перед чернеткою", 2800)
+            else:
+                messagebox.showwarning("Лекцію створено", note, parent=self)
+            self.app.request_sync(1200)
             self.close()
 
     def skip(self):
@@ -545,8 +576,8 @@ class ChatGPTLectureDialog(tk.Toplevel):
             text = (f"Створено лекцій: {len(self.created)}. Прив’язано до уроків: {linked}.")
             if self.skipped:
                 text += "\nПропущено: " + ", ".join(x.stream for x in self.skipped) + "."
-            messagebox.showinfo("Лекції за день", text + "\n\nУ Classroom нічого не створено. "
-                                "Перевірте Word перед чернетками.", parent=self.app)
+            show_toast(self.app, "✓ " + text.replace("\n", " ") + " · у Classroom нічого не створено", 3200)
+            self.app.request_sync(1200)
         self.close()
 
     def close(self):
@@ -569,6 +600,15 @@ def open_chatgpt_dialog(app, lessons, batch=False, replace_existing=False):
     return ChatGPTLectureDialog(app, lessons, batch=batch, replace_existing=replace_existing)
 
 
+def _label_for(app, lesson):
+    """«8-Б-В-Г ГО», якщо цей самий урок у той самий день у кількох класів; інакше — власний клас."""
+    try:
+        from .engine import same_day_label
+        return same_day_label(lesson, app._parallel(lesson))
+    except Exception:
+        return lesson.stream
+
+
 def _plan_lessons_of(lesson):
     try:
         from .engine import read_json
@@ -577,24 +617,29 @@ def _plan_lessons_of(lesson):
         return None
 
 
-def build_day_prompt(lessons):
-    """Один спільний запит на всі уроки дня: кожен урок — окреме завдання з власними файлами."""
+def build_day_prompt(lessons, labels=None):
+    """Один спільний запит на всі уроки дня: кожен урок — окреме завдання з власними файлами + один ZIP."""
     from .chatgpt_bridge import PROMPT_MARKER
     total = len(lessons)
+    day = lessons[0].day if lessons else ""
+    archive = f"{day[8:10]}.{day[5:7]}.{day[2:4]}.zip" if day else "день.zip"
     lines = [
         f"{PROMPT_MARKER} — лекції на весь день ({total} " + ("урок" if total == 1 else "уроків") + ")",
         "",
         "Нижче "+str(total)+" окремих завдань — по одному на кожен урок. НЕ став уточнювальних "
         "запитань і не чекай підтвердження: виконай їх ПІДРЯД. "
         "Для КОЖНОГО уроку створи його власні два файли (справжній Word з текстом — НЕ картинку — і "
-        "PNG-інфографіку) з ТОЧНИМИ іменами, вказаними в завданні. Після всіх завдань напиши в чаті "
-        "по одному рядку на урок: «Готово. КОД УРОКУ: …» — і дай посилання на всі файли. "
+        "PNG-інфографіку) з ТОЧНИМИ іменами, вказаними в завданні. ОСТАННІМ створи ще один файл — "
+        f"ZIP-архів «{archive}», у який поклади ВСІ створені файли (Word і PNG) під тими самими іменами, "
+        "і дай одне посилання на цей архів: я завантажу все одним кліком. Після всіх завдань напиши в чаті "
+        "по одному рядку на урок: «Готово. КОД УРОКУ: …» — і дай посилання на всі файли та архів. "
         "Лекції в чат не переписуй.",
         "",
     ]
     for number, lesson in enumerate(lessons, 1):
         lines.append(f"==================== ЗАВДАННЯ {number} з {total} ====================")
-        lines.append(build_prompt(lesson, _plan_lessons_of(lesson)))
+        label = (labels or {}).get(lesson.unique_key)
+        lines.append(build_prompt(lesson, _plan_lessons_of(lesson), label=label))
         lines.append("")
     return "\n".join(lines)
 
@@ -612,12 +657,13 @@ class ChatGPTDayDialog(tk.Toplevel):
         self.unassigned = []
         self.escape_closes = True
         day = self.lessons[0].day
-        self.title(f"Лекції ГПТ на весь день — {day[8:10]}.{day[5:7]}.{day[:4]}")
+        self.title(f"Лекції GPT на весь день — {day[8:10]}.{day[5:7]}.{day[:4]}")
         fit_work_window(self, "normal")
         self.transient(app)
         self._build()
         self.refresh()
         self._rebuild_prompt()
+        self._poll_job = self.after(1500, self._poll_state)
 
     def _build(self):
         outer = ttk.Frame(self, padding=12)
@@ -690,6 +736,7 @@ class ChatGPTDayDialog(tk.Toplevel):
         buttons.pack(fill="x", pady=(8, 0))
         AccentButton(buttons, "✅ Прикріпити всі", self.attach_all).pack(side="left")
         ttk.Button(buttons, text="Закрити", command=self.close).pack(side="right")
+        ttk.Button(buttons, text="Платно через OpenAI API…", command=self.use_api).pack(side="right", padx=8)
 
     # ---- вибір уроків ----
     def active_lessons(self):
@@ -732,7 +779,8 @@ class ChatGPTDayDialog(tk.Toplevel):
     def _rebuild_prompt(self):
         active = self.active_lessons()
         self.prompt.delete("1.0", "end")
-        self.prompt.insert("1.0", build_day_prompt(active) if active else
+        labels = {x.unique_key: _label_for(self.app, x) for x in active}
+        self.prompt.insert("1.0", build_day_prompt(active, labels) if active else
                            "Не вибрано жодного класу: поставте галочку «Word?» біля потрібних уроків.")
 
     # ---- запит ----
@@ -850,6 +898,7 @@ class ChatGPTDayDialog(tk.Toplevel):
 
     def refresh(self):
         selected = self.table.selection()
+        words_total = pictures_total = 0
         for item in self.table.get_children():
             self.table.delete(item)
         for index, lesson in enumerate(self.lessons):
@@ -857,20 +906,28 @@ class ChatGPTDayDialog(tk.Toplevel):
                 spread = len(self.app._parallel(lesson))
             except Exception:
                 spread = "—"
+            state_entry = self.app.state.get("files", {}).get(lesson.unique_key, {})
+            has_word = index in self.docx or bool(state_entry.get("complete"))
+            try:
+                from .attachments import files_for_lesson
+                pictures = len(self.images.get(index, [])) or len(
+                    files_for_lesson(self.app.state, lesson.unique_key))
+            except Exception:
+                pictures = len(self.images.get(index, []))
+            words_total += has_word
+            pictures_total += pictures
             self.table.insert("", "end", iid=str(index), values=(
                 "☑" if index in self.checked else "☐", lesson.lesson_number, lesson.stream,
-                lesson.topic[:110], spread, "✅" if index in self.docx else "—",
-                len(self.images.get(index, [])) or "—"))
+                lesson.topic[:110], spread, "✅" if has_word else "—", pictures or "—"))
         if selected and self.table.exists(selected[0]):
             self.table.selection_set(selected[0])
         self.unknown.delete(0, "end")
         for path in self.unassigned:
             self.unknown.insert("end", path.name)
         self.counter.config(text=f"Вибрано для лекції: {len(self.checked)} з {len(self.lessons)}")
-        ready = len(self.docx)
-        self.note.config(text=f"Розпізнано Word: {ready}."
+        self.note.config(text=f"Розпізнано: Word — {words_total} · зображень — {pictures_total}."
                          + (f" Нерозпізнаних файлів: {len(self.unassigned)}." if self.unassigned else ""),
-                         foreground="#2E6B30" if ready else "#33475B")
+                         foreground="#2E6B30" if words_total else "#33475B")
 
     def attach_all(self):
         if not self.docx:
@@ -891,17 +948,52 @@ class ChatGPTDayDialog(tk.Toplevel):
                                 "або підтверджений Word.")
             if skipped:
                 warnings.append(f"{lesson.stream}: {skipped}")
-        text = f"Прикріплено лекцій: {done}."
-        waiting = [self.lessons[i].stream for i in sorted(self.checked) if i not in self.docx]
-        if waiting:
-            text += "\nЗалишились без Word (позначені, але файлу немає): " + ", ".join(waiting[:8])
-        if warnings:
-            text += "\n\n" + "\n".join(warnings[:6])
-        messagebox.showinfo("Лекції за день", text + "\n\nУ Classroom нічого не створено. "
-                            "Перевірте Word перед чернетками.", parent=self)
+        pictures = sum(len(v) for v in self.images.values())
+        waiting = [self.lessons[i].stream for i in sorted(self.checked) if i not in self.docx
+                   and not self.app.state.get("files", {}).get(self.lessons[i].unique_key, {}).get("complete")]
+        self.app.request_sync(1200)                    # Classroom: після прикріплення сама перевірить стан
+        if warnings or waiting:
+            text = f"Прикріплено: Word — {done}, зображень — {pictures}."
+            if waiting:
+                text += "\nЗалишились без Word: " + ", ".join(waiting[:8])
+            if warnings:
+                text += "\n\n" + "\n".join(warnings[:6])
+            messagebox.showwarning("Лекції за день", text + "\n\nУ Classroom нічого не створено.", parent=self)
+        else:
+            show_toast(self.app, f"✓ Прикріплено: Word — {done}, зображень — {pictures} · "
+                                 "у Classroom нічого не створено", 2600)
         self.close()
 
+    def _poll_state(self):
+        self._poll_job = None
+        try:
+            if not self.winfo_exists():
+                return
+            self.refresh()
+        except tk.TclError:
+            return
+        self._poll_job = self.after(1500, self._poll_state)
+
+    def use_api(self):
+        """Платна автоматична генерація (OpenAI API) для вибраних уроків дня — як у вікні однієї лекції."""
+        chosen = self.active_lessons()
+        if not chosen:
+            messagebox.showinfo("OpenAI API", "Не вибрано жодного класу: поставте галочку «Word?».", parent=self)
+            return
+        if not messagebox.askyesno(
+                "OpenAI API", f"Це ПЛАТНИЙ автоматичний режим: потрібен ваш OpenAI API-ключ, оплата окремо від "
+                f"підписки ChatGPT. Буде не більше {len(chosen)} запитів.\n\nПерейти до нього?", parent=self):
+            return
+        self.close()
+        self.app.batch_ai(only=chosen)
+
     def close(self):
+        job = getattr(self, "_poll_job", None)
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
         auto = getattr(self, "_auto", None)
         if auto is not None:
             auto.finished = True

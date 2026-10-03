@@ -287,22 +287,24 @@ class MainWindowFeatureTests(TkCase):
             self.assertEqual(app.state["description_overrides"], {"k": "текст"})
         app.update()
         group = app.undo_button.master
-        ordered = [w.cget("text") for w in sorted(group.winfo_children(), key=lambda w: w.winfo_rootx())
-                   if isinstance(w, ttk.Button)]
+        names = {"↶ Назад", "↷ Вперед", "📄 Зразки документів", "🗂 Мої дані"}
+        ordered = [w.cget("text") for w in sorted(group.winfo_children(), key=lambda w: (w.winfo_rooty(), w.winfo_rootx()))
+                   if isinstance(w, ttk.Button) and w.cget("text") in names]
         self.assertEqual(ordered, ["↶ Назад", "↷ Вперед", "📄 Зразки документів", "🗂 Мої дані"])
 
     def test_header_wraps_on_a_narrow_screen_instead_of_clipping_buttons(self):
         app = self.make()
         app.geometry("1180x700")
         pump(app, 0.5)
-        group = app.undo_button.master
-        for button in group.winfo_children():
-            self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth() - 2, button.cget("text"))
-        self.assertGreater(group.winfo_rooty(), app.date_entry.winfo_rooty())       # другий рядок
+        header = app.undo_button.master
+        for button in header.winfo_children():
+            if button.winfo_class() in ("TButton", "TLabel", "TEntry"):
+                right = button.winfo_rootx() - app.winfo_rootx() + button.winfo_width()
+                self.assertLessEqual(right, app.winfo_width() + 1, str(button.cget("text") if button.winfo_class() != "TEntry" else "date"))
+        self.assertGreater(app.undo_button.winfo_rooty(), app.date_entry.winfo_rooty())      # другий рядок
         app.geometry("2300x800")
         pump(app, 0.5)
-        self.assertLessEqual(abs(group.winfo_rooty() - app.date_entry.winfo_rooty()), 12)  # знову в один рядок
-
+        self.assertLessEqual(abs(app.undo_button.winfo_rooty() - app.date_entry.winfo_rooty()), 12)   # знову в один
     def test_undo_is_blocked_while_the_editor_is_open(self):
         app = self.make()
         editor = editor_ui.SchoolEditor(app, app.update_day)
@@ -349,26 +351,31 @@ class MainWindowFeatureTests(TkCase):
         wizard.assert_not_called()
         sync.assert_called_once_with(interactive=True)
 
-    def test_clean_start_offer_only_in_frozen_build_and_only_once(self):
+    def test_clean_start_runs_once_with_a_backup_and_never_repeats(self):
         app = self.make()
-        with mock.patch.object(gui.messagebox, "askyesno") as ask:
-            app._maybe_offer_blank_start()                            # звичайний запуск: не питає
-        ask.assert_not_called()
+        resets, marker = [], {}
+        with mock.patch.object(gui.messagebox, "askyesno", side_effect=AssertionError("запитань не має бути")):
+            app._clean_start_once()                                   # не EXE-збірка: нічого не робить
         app.cfg["course_map"] = {"8-Б ІУ": {"plan": "x", "course_title": "8-Б ІУ"}}
-        app.state.pop("blank_offer_37", None)
+        toasts = []
         with mock.patch.dict(gui.os.environ, {"POMICHNYK_NO_OFFERS": ""}), \
                 mock.patch.object(gui.sys, "frozen", True, create=True), \
-                mock.patch.object(gui.messagebox, "askyesno", return_value=True) as ask, \
-                mock.patch.object(data_tools, "reset_to_blank") as reset, \
-                mock.patch.object(data_tools, "auto_backup_path", return_value=Path("/tmp/x.zip")), \
-                mock.patch.object(app, "reload_data"), \
-                mock.patch.object(gui, "save_state"):
-            app._maybe_offer_blank_start()
-            self.assertTrue(ask.called and reset.called)
-            self.assertTrue(app.state.get("blank_offer_37"))
-            ask.reset_mock()
-            app._maybe_offer_blank_start()
-            ask.assert_not_called()
+                mock.patch.object(data_tools, "read_install", side_effect=lambda *a: dict(marker)), \
+                mock.patch.object(data_tools, "write_install", side_effect=lambda v, *a: marker.update(v)), \
+                mock.patch.object(data_tools, "reset_to_blank", side_effect=lambda p, *a, **k: resets.append(p)), \
+                mock.patch.object(data_tools, "auto_backup_path", return_value=Path("/tmp/копія.zip")), \
+                mock.patch.object(app, "apply_data_operation"), \
+                mock.patch.object(app, "begin_data_operation"), \
+                mock.patch.object(gui, "show_toast", side_effect=lambda parent, text, *a, **k: toasts.append(text)):
+            app._clean_start_once()
+            self.assertEqual(resets, [Path("/tmp/копія.zip")])
+            self.assertEqual(marker, {"clean_start": data_tools.CLEAN_START_RELEASE})
+            self.assertIn("Повну копію збережено", toasts[0])
+            app._clean_start_once()                                   # вдруге — ні
+            self.assertEqual(len(resets), 1)
+
+    def test_clean_start_marker_is_never_part_of_a_backup(self):
+        self.assertTrue(data_tools.is_secret(Path("install_state.json")))
 
     def test_course_mapping_default_uses_meaning(self):
         app = self.make()

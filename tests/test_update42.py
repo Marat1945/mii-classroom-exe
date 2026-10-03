@@ -170,7 +170,9 @@ class BulkLectureDropTests(TkCase):
             entry = self.app.state["files"][lesson.unique_key]
             self.assertTrue(entry["complete"], lesson.stream)
             texts = [p.text for p in Document(entry["path"]).paragraphs if p.text.strip()]
-            self.assertEqual(texts[0], f"{lesson.stream}, Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}")
+            label = engine.same_day_label(lesson, material_library.parallel_matches(
+                lesson, self.app.cfg, calendar=self.lessons))
+            self.assertEqual(texts[0], f"{label}, Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}")
             self.assertTrue(texts[-1].startswith("Д/з:"))
             self.assertEqual(len(files_for(self.app.state, lesson)), 1, lesson.stream)         # картинка — у вкладеннях
         report = self.shown[-1]

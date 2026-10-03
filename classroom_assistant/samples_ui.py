@@ -132,11 +132,11 @@ def build_sample_ktp(path):
     section.text = "Розділ 1. Приклад назви розділу"
     section.paragraphs[0].runs[0].bold = True
     rows = [
-        ("1", "8-Б 04.09. 8-В 04.09. 8-Г 03.09.", "Перша тема уроку, записана повністю", "прочитати § 1"),
-        ("2", "8-Б 07.09. 8-В 07.09. 8-Г 07.09.", "Друга тема уроку", "прочитати § 2, повторити § 1"),
-        ("3", "8-Б 11.09. 8-В 11.09. 8-Г 10.09.", "Третя тема. Практичне заняття", "завдання в зошиті"),
-        ("4-5", "8-Б 14.09. 8-В 14.09. 8-Г 14.09.", "Подвійний урок з однією темою", "прочитати § 4–5"),
-        ("6", "8-Б 18.09. 8-В 18.09. 8-Г 17.09.", "Узагальнення з розділу 1", ""),
+        ("1", "8-Б 04.09.\n8-В 04.09.\n8-Г 03.09.", "Перша тема уроку, записана повністю", "прочитати § 1"),
+        ("2", "8-Б 07.09.\n8-В 07.09.\n8-Г 07.09.", "Друга тема уроку", "прочитати § 2, повторити § 1"),
+        ("3", "8-Б 11.09.\n8-В 11.09.\n8-Г 10.09.", "Третя тема. Практичне заняття", "завдання в зошиті"),
+        ("4-5", "8-Б 14.09.\n8-В 14.09.\n8-Г 14.09.", "Подвійний урок з однією темою", "прочитати § 4–5"),
+        ("6", "8-Б 18.09.\n8-В 18.09.\n8-Г 17.09.", "Узагальнення з розділу 1", ""),
     ]
     for values in rows:
         cells = table.add_row().cells
@@ -275,6 +275,12 @@ def open_folder(path: Path):
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def _auto_backup(prefix):
+    """Копія без запитань про місце: завжди в папку «Резервні копії» поруч із даними."""
+    from .data_tools import auto_backup_path
+    return auto_backup_path(prefix, ROOT)
+
+
 def show_data_folder(parent):
     win = tk.Toplevel(parent)
     win.title("Мої дані")
@@ -296,9 +302,11 @@ def show_data_folder(parent):
     bar.pack(fill="x")
 
     def export():
+        from .data_tools import backup_dir
         target = filedialog.asksaveasfilename(
             parent=win, title="Зберегти копію всіх даних", defaultextension=".zip",
-            initialfile="Помічник учителя — мої дані.zip", filetypes=[("ZIP-архів", "*.zip")])
+            initialdir=str(backup_dir(ROOT)), initialfile="Помічник учителя — мої дані.zip",
+            filetypes=[("ZIP-архів", "*.zip")])
         if not target:
             return
         try:
@@ -308,6 +316,13 @@ def show_data_folder(parent):
             messagebox.showerror("Мої дані", str(ex), parent=win)
     ttk.Button(bar, text="📂 Відкрити папку з даними", command=lambda: open_folder(ROOT)).pack(side="left")
     ttk.Button(bar, text="⬇ Зберегти копію всіх даних (ZIP)…", command=export).pack(side="left", padx=8)
+
+    def open_backups():
+        from .data_tools import backup_dir
+        folder = backup_dir(ROOT)
+        folder.mkdir(parents=True, exist_ok=True)
+        open_folder(folder)
+    ttk.Button(bar, text="🗄 Папка резервних копій", command=open_backups).pack(side="left")
 
     def default_name(prefix):
         from datetime import datetime
@@ -324,22 +339,19 @@ def show_data_folder(parent):
             apply(label, undo_zip, redo)      # «↶ Назад» у головному вікні поверне все з копії
         elif getattr(parent, "reload_data", None):
             parent.reload_data()
-        messagebox.showinfo("Мої дані", message, parent=win)
+        from .toast import show_toast
+        show_toast(parent, message.replace("\n", " "), 4200)             # без кнопок: зникає саме
 
     def blank_start():
         if not messagebox.askyesno(
                 "Почати з порожньої програми",
                 "Програма стане ПОРОЖНЬОЮ: без розкладу, календарних планів, класів, готових Word "
                 "і вкладень. Підключення до Google збережеться.\n\n"
-                "СПЕРШУ ви збережете повну копію всіх даних у ZIP — з неї можна відновитися кнопкою "
-                "«Відновити з копії». Продовжити?", parent=win):
+                "СПЕРШУ програма САМА збереже повну копію всіх даних у папку «Резервні копії» (поруч із "
+                "даними). Повернути все: кнопка «↶ Назад» або «Відновити з копії». Продовжити?", parent=win,
+                default="no"):
             return
-        target = filedialog.asksaveasfilename(
-            parent=win, title="Куди зберегти повну копію ПЕРЕД очищенням", defaultextension=".zip",
-            initialfile=default_name("Копія даних до очищення"), filetypes=[("ZIP-архів", "*.zip")])
-        if not target:
-            messagebox.showinfo("Мої дані", "Без копії нічого не очищено.", parent=win)
-            return
+        target = _auto_backup("Копія перед скиданням")
         begin()
         try:
             count = reset_to_blank(target)
@@ -347,14 +359,15 @@ def show_data_folder(parent):
             messagebox.showerror("Мої дані", f"Не вдалося: {ex}\nДані не змінено, якщо копію не створено.",
                                  parent=win)
             return
-        after_change(f"Готово. Збережено файлів у копії: {count}.\nПрограма порожня: завантажте "
-                     "розклад (редактор → «Розклад») і КТП (перетягніть на клас).\n"
-                     "Повернути все назад: кнопка «↶ Назад» у головному вікні.",
+        after_change(f"Готово. Копію збережено ({count} файлів): Резервні копії\\{Path(target).name}. "
+                     "Програма порожня; повернути все — «↶ Назад».",
                      "Скинуто все", target, "reset")
 
     def restore():
+        from .data_tools import backup_dir
         source = filedialog.askopenfilename(
-            parent=win, title="Оберіть копію даних (ZIP)", filetypes=[("ZIP-архів", "*.zip")])
+            parent=win, title="Оберіть копію даних (ZIP)", initialdir=str(backup_dir(ROOT)),
+            filetypes=[("ZIP-архів", "*.zip")])
         if not source:
             return
         if not messagebox.askyesno(
@@ -362,12 +375,7 @@ def show_data_folder(parent):
                 "Поточні дані будуть замінені даними з копії. Перед цим програма сама збереже "
                 "поточний стан у ZIP-файл. Продовжити?", parent=win):
             return
-        safety = filedialog.asksaveasfilename(
-            parent=win, title="Куди зберегти ПОТОЧНИЙ стан перед відновленням",
-            defaultextension=".zip", initialfile=default_name("Стан перед відновленням"),
-            filetypes=[("ZIP-архів", "*.zip")])
-        if not safety:
-            return
+        safety = _auto_backup("Стан перед відновленням")
         begin()
         try:
             count = restore_from_zip(source, safety)

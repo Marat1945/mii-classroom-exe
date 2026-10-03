@@ -134,7 +134,7 @@ def preceding_topics(lesson, plan_lessons, limit=12) -> list[str]:
     return topics[::-1]
 
 
-def build_prompt(lesson, plan_lessons=None, mode="file") -> str:
+def build_prompt(lesson, plan_lessons=None, mode="file", label=None) -> str:
     """Повний самодостатній запит. mode="file" — готовий Word + одна інфографіка (основний);
     mode="text" — запасний: відповідь текстом певного формату."""
     profile = lesson_profile(lesson.stream)
@@ -147,6 +147,7 @@ def build_prompt(lesson, plan_lessons=None, mode="file") -> str:
     homework = (lesson.homework or "").strip()
     topic = lesson.topic.strip()
     file_mode = mode != "text"
+    shown = label or lesson.stream                           # «8-Б-В-Г ГО», якщо урок спільний за один день
     intro = ("Ти — досвідчений учитель і методист. Створи ГОТОВИЙ ФАЙЛ Word (.docx) з лекцією "
              "українською мовою, яку учень прочитає самостійно під час дистанційного навчання, і "
              "ОДНУ картинку-інфографіку до неї. Результат — файли для завантаження, а не текст у чаті."
@@ -165,6 +166,8 @@ def build_prompt(lesson, plan_lessons=None, mode="file") -> str:
         f"• Дата: {date_text}, урок №{lesson.lesson_number} за КТП",
         f"• Тема: {topic}",
     ]
+    if shown != lesson.stream:
+        lines.append(f"• Цей урок у той самий день проводиться для класів «{shown}»: один документ для всіх.")
     if homework:
         lines.append(f"• Д/з за КТП (лише для орієнтації; у відповідь не переписуй): {homework}")
     earlier = preceding_topics(lesson, plan_lessons) if _is_review(lesson.topic) else []
@@ -212,14 +215,14 @@ def build_prompt(lesson, plan_lessons=None, mode="file") -> str:
             "2. Другий пункт.",
         ]
         return "\n".join(lines)
-    word_name = lesson_base_name(lesson) + ".docx"
+    word_name = lesson_base_name(lesson, label=shown) + ".docx"
     lines += [
         "ЩО ПОТРІБНО ВІДДАТИ — РІВНО ДВА ФАЙЛИ (текст у чаті — не результат):",
         f"1) Готовий файл Word (.docx) з ТОЧНИМ іменем «{word_name}» (ім'я починається з класу та дати — "
         "НЕ змінюй його). Створи справжній документ "
         "і дай посилання для завантаження.",
         f"2) ОДНА картинка-інфографіка до цієї лекції — один файл PNG з іменем "
-        f"«{infographic_name(lesson)}.png» (те саме ім'я, що й у Word). Рівно ОДНЕ зображення: не колаж із кількох файлів і не "
+        f"«{infographic_name(lesson, shown)}.png» (те саме ім'я, що й у Word). Рівно ОДНЕ зображення: не колаж із кількох файлів і не "
         "серія. Горизонтальне (≈1600×1000), назва теми вгорі, 4–6 блоків: ключові дати, події, "
         "постаті, поняття, схема причин і наслідків або хронологічна лінія; спокійні кольори, "
         "великий читабельний шрифт, українською мовою, БЕЗ помилок у словах і без вигаданих "
@@ -240,7 +243,7 @@ def build_prompt(lesson, plan_lessons=None, mode="file") -> str:
         "1,7 см; колонтитули 1,27 см від краю.",
         "• Основний шрифт Times New Roman, чорний, 14 pt, по ширині; відступ першого рядка абзацу "
         "1,0 см; інтервал 1,08; після абзацу 6 pt. Ключові поняття й імена виділяй жирним помірно.",
-        f"• ПЕРШИЙ абзац документа: «{lesson.stream}, Урок {short_date} — {topic.rstrip('.')}.» — жирний, 14 pt, "
+        f"• ПЕРШИЙ абзац документа: «{shown}, Урок {short_date} — {topic.rstrip('.')}.» — жирний, 14 pt, "
         "ліворуч, без відступу, світло-блакитний фон #EAF2F8. У документі НЕ пиши слів «Код уроку».",
         "• Далі назва теми: стиль Title, 19 pt, жирний, #1F4E79, ліворуч; 6 pt перед і 12 pt після; "
         "тему відтворюй ТОЧНО.",
@@ -277,9 +280,9 @@ def build_prompt(lesson, plan_lessons=None, mode="file") -> str:
     return "\n".join(lines)
 
 
-def infographic_name(lesson) -> str:
+def infographic_name(lesson, label=None) -> str:
     """Ім'я картинки = ім'я Word (інше розширення): так обидва файли розпізнаються як один урок."""
-    return lesson_base_name(lesson)
+    return lesson_base_name(lesson, label=label)
 
 
 def _norm(text: str) -> str:

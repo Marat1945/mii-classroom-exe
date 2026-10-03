@@ -189,15 +189,15 @@ class BulkImportTests(TkCase):
             ktp = make_ktp(Path(folder) / "Календарне_8_клас_ІУ.docx", "Історія України, 8 клас", ["8-Б", "8-В"])
             summaries = []
             with mock.patch.object(editor_ui.messagebox, "askyesno", side_effect=AssertionError("запитання!")), \
-                    mock.patch.object(editor_ui.messagebox, "showinfo",
-                                      side_effect=lambda *a, **k: summaries.append(a[1])):
+                    mock.patch.object(editor_ui, "show_toast",
+                                      side_effect=lambda parent, text, *a, **k: summaries.append(text)):
                 editor.import_files([ktp, schedule])                           # розклад обробляється першим
         self.assertIn("8-Б ІУ", editor.cfg["course_map"])
         self.assertEqual(len(editor.cfg["holidays"]), 3)                       # канікули взято з першого рядка
         cmap = editor.cfg["course_map"]
         self.assertEqual(len(editor.plans[cmap["8-Б ІУ"]["plan"]]["lessons"]), 5)
         self.assertEqual(cmap["8-Б ІУ"]["plan"], cmap["8-В ІУ"]["plan"])
-        self.assertIn("Імпортовано: 2 з 2.", summaries[0])
+        self.assertIn("Імпортовано: 2 з 2", summaries[0])
 
 
 class WindowWideDropTests(TkCase):

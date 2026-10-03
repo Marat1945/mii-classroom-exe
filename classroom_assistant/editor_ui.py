@@ -2,6 +2,7 @@
 from __future__ import annotations
 import copy
 import json
+import os
 import re
 from datetime import date, datetime, timedelta
 import tkinter as tk
@@ -18,6 +19,7 @@ from .history import History, describe_change
 from .course_match import (assign_streams, best_match, link_streams, norm as match_norm, parse as match_parse,
                            _expand as expand_subjects)
 from . import ktp_detect, ktp_import
+from .toast import show_toast
 try:
     from tkinterdnd2 import DND_FILES
 except ImportError:
@@ -287,6 +289,9 @@ class SchoolEditor(tk.Toplevel):
         self.history.reset(self._history_snapshot())
         self.history_undo=self.undo;self.history_redo=self.redo      # Ctrl+Z / Ctrl+Y
         self._poll_job=self.after(700,self._history_poll)
+        # Автозбереження: у виробничій програмі робота не губиться, навіть якщо забули натиснути «Зберегти».
+        self.autosave_enabled=not os.environ.get("POMICHNYK_NO_OFFERS")
+        self._autosave_job=self.after(20000,self._autosave_tick)
 
     # ---------- Назад / Вперед ----------
     def _history_snapshot(self):
@@ -339,11 +344,33 @@ class SchoolEditor(tk.Toplevel):
         self.history_note.config(text=f"Повернуто: {step[1]}",foreground="#2E6B30")
         return "break"
 
-    def destroy(self):
-        job=getattr(self,"_poll_job",None)
-        if job:
-            try:self.after_cancel(job)
+    def has_unsaved(self):
+        return bool(self.cfg!=self.original_cfg or self.plans!=self.original_plans
+                    or self.cfg.get("pending_stream_renames"))
+
+    def _autosave_tick(self):
+        try:
+            if not self.winfo_exists():return
+            if self.autosave_enabled and self.has_unsaved():
+                self.save(confirm=False,close=False,silent=True)
+        except tk.TclError:return
+        self._autosave_job=self.after(20000,self._autosave_tick)
+
+    def _autosave_soon(self,delay=500):
+        if not self.autosave_enabled:return
+        def go():
+            try:
+                if self.winfo_exists() and self.has_unsaved():
+                    self.save(confirm=False,close=False,silent=True)
             except tk.TclError:pass
+        self.after(delay,go)
+
+    def destroy(self):
+        for name in ("_poll_job","_autosave_job"):
+            job=getattr(self,name,None)
+            if job:
+                try:self.after_cancel(job)
+                except tk.TclError:pass
         super().destroy()
 
     def _setup_file_drop_targets(self):
@@ -1266,6 +1293,7 @@ class SchoolEditor(tk.Toplevel):
             self._manual_preview(files[0],entry)            # автоматично не вийшло: показуємо таблицю
             return
         self._report_import(results,bulk)
+        if any(r["ok"] for r in results):self._autosave_soon()
 
     def _report_import(self,results,bulk):
         done=[r for r in results if r["ok"]];failed=[r for r in results if not r["ok"]]
@@ -1284,7 +1312,12 @@ class SchoolEditor(tk.Toplevel):
         text=f"Імпортовано: {len(done)} з {len(results)}.\n\n"+"\n".join(lines[:30])
         if len(lines)>30:text+=f"\n… ще {len(lines)-30}"
         text+="\n\nУсе можна скасувати кнопкою «↶ Назад», доки редактор відкритий."
-        (messagebox.showwarning if failed else messagebox.showinfo)("Імпорт файлів",text,parent=self)
+        if failed:
+            messagebox.showwarning("Імпорт файлів",text,parent=self)
+        else:
+            shown=lines[:6]
+            show_toast(self,f"✓ Імпортовано: {len(done)} з {len(results)}\n"+"\n".join(shown)
+                       +(f"\n… ще {len(lines)-6}" if len(lines)>6 else ""),2400+300*len(shown))
 
     def _auto_import_ktp(self,path,entry,bulk):
         name=path.name
@@ -2284,15 +2317,17 @@ class SchoolEditor(tk.Toplevel):
             self.refresh_holidays()
         return "break"
 
-    def save(self,confirm=True):
+    def save(self,confirm=True,close=True,silent=False):
         # Зберігайте ISO всередині програми, а ДД.ММ.РРРР — тільки в інтерфейсі.
         try:self.cfg.update(self._year_values())
         except ValueError as ex:
-            messagebox.showerror("Дати",str(ex),parent=self);return
+            if not silent:messagebox.showerror("Дати",str(ex),parent=self)
+            return False
         self.cfg["anchor_phase"]=self.anchorphase.get()
         try:self._save_semester_values()
         except ValueError as ex:
-            messagebox.showerror("Другий семестр",str(ex),parent=self);return
+            if not silent:messagebox.showerror("Другий семестр",str(ex),parent=self)
+            return False
         self.cfg["period_times"]=[[v.get().strip() for v in row] for row in self.timevars]
         self.cfg["meal_break_after"]=int(self.meal_after.get())
         self.cfg["meal_label"]=self.meal_label.get().strip() or "ХАРЧУВАННЯ У ЇДАЛЬНІ"
@@ -2307,7 +2342,9 @@ class SchoolEditor(tk.Toplevel):
         errors=[e for e in errors if not e.startswith("Порожній КТП")]
         if errors:
             if renames:self.cfg["pending_stream_renames"]=renames
-            messagebox.showerror("Помилки у даних","Виправте перед збереженням:\n"+"\n".join(errors[:20]),parent=self);return
+            if not silent:
+                messagebox.showerror("Помилки у даних","Виправте перед збереженням:\n"+"\n".join(errors[:20]),parent=self)
+            return False
         if self.cfg==self.original_cfg and self.plans==self.original_plans and not renames:
             if confirm:messagebox.showinfo("Дані","Змін немає.",parent=self)
             return True
@@ -2350,14 +2387,16 @@ class SchoolEditor(tk.Toplevel):
             self.parent.cfg=copy.deepcopy(self.cfg)
             self.parent.state=state
             self.parent.update_day()
+            if hasattr(self.parent,"request_sync"):self.parent.request_sync(700)    # Classroom: стан покаже сама
         except Exception as ex:
             if renames:self.cfg["pending_stream_renames"]=renames
-            messagebox.showerror("Помилка збереження",str(ex),parent=self);return
+            if not silent:messagebox.showerror("Помилка збереження",str(ex),parent=self)
+            return False
         self.original_cfg=copy.deepcopy(self.cfg);self.original_plans=copy.deepcopy(self.plans)
         self._is_new_year=False
-        messagebox.showinfo("Збережено",
-            "Усі зміни збережено локально.\nРезервна копія:\n"+str(backup)+
-            "\n\nВсі матеріали Google Classroom залишилися без змін.",parent=self)
+        if not close:
+            return True                                   # автозбереження: редактор лишається відкритим
+        show_toast(self,"✓ Усе збережено · резервну копію створено · Google Classroom без змін",2600)
         try:self.destroy()
         except tk.TclError:pass
         return True

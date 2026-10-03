@@ -51,10 +51,11 @@ class ClassroomDrivenImportTests(TkCase):
         files = sorted(SOURCES.glob("*.docx"))
         shown = []
         a, b, c = self.no_questions(editor)
-        with a, b, c, mock.patch.object(editor_ui.messagebox, "showinfo", side_effect=lambda *x, **k: shown.append(x[1])), \
+        with a, b, c, mock.patch.object(editor_ui, "show_toast",
+                                        side_effect=lambda parent, text, *x, **k: shown.append(text)), \
                 mock.patch.object(editor_ui.messagebox, "showwarning", side_effect=lambda *x, **k: shown.append(x[1])):
             editor.import_files(files)
-        self.assertIn(f"Імпортовано: {len(files)} з {len(files)}.", shown[0])
+        self.assertIn(f"Імпортовано: {len(files)} з {len(files)}", shown[0])
         cmap = editor.cfg["course_map"]
         # потоки створено з канонічними назвами, але прив'язано до ТОЧНИХ назв курсів Classroom
         self.assertEqual(cmap["8-Б ВІ"]["course_title"], "8-Б ВI")                  # латинська I з Classroom
