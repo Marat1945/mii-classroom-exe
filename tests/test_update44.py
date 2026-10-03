@@ -10,13 +10,19 @@ from unittest import mock
 
 from test_update36 import TkCase
 
-from classroom_assistant import attachments, draft_batch, engine, google_client, gui, material_library
+from docx import Document
+
+from test_update42 import make_lecture, make_picture
+from classroom_assistant import (attachments, chatgpt_ui, draft_batch, engine, google_client, gui,
+                                 material_library)
+from classroom_assistant.engine import lesson_base_name
 from classroom_assistant.engine import build_calendar
 
 REPO_DATA = Path(__file__).resolve().parents[1] / "data"
 
 
-class ReconcileTests(TkCase):
+class TempProgram(TkCase):
+    """Головне вікно на справжніх даних у тимчасовій папці (нічого в репозиторії не змінюється)."""
     NEEDS_ROOT = False
 
     def setUp(self):
@@ -68,6 +74,9 @@ class ReconcileTests(TkCase):
         self.app.update_day()
         return {self.app.rows[int(i)].stream: self.app.grid.item(i, "values")[-1] for i in self.app.grid.get_children()}
 
+
+
+class ReconcileTests(TempProgram):
     def test_a_draft_deleted_in_classroom_stops_being_reported_as_created(self):
         a, b, c = self.lessons
         for lesson in (a, b, c):
@@ -168,7 +177,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class GoogleButtonTests(ReconcileTests):
+class GoogleButtonTests(TempProgram):
     """Кнопка «Підключити Google» завжди відповідає: коротка підказка без «ОК»."""
 
     def test_label_shows_whether_google_is_connected(self):
@@ -226,3 +235,88 @@ class GoogleButtonTests(ReconcileTests):
                 mock.patch("classroom_assistant.google_setup_ui.show_google_wizard") as wizard:
             self.app.connect_google()
         wizard.assert_called_once_with(self.app)
+
+
+class DayRegenerationTests(TempProgram):
+    """Кнопка «Лекції GPT на весь день» виконує завдання для ВСІХ уроків дня, навіть якщо Word уже є."""
+
+    def day_rows(self, text="06.10.2026"):
+        self.app.datevar.set(text)
+        self.app.update_day()
+        return list(self.app.rows)
+
+    def give_everyone_a_word(self, rows):
+        folder = Path(self.tmp.name) / "наявні"
+        folder.mkdir(exist_ok=True)
+        for row in rows:
+            word = make_lecture(folder / f"{row.stream} {row.period}.docx", f"{row.stream}, Урок")
+            self.app.state.setdefault("files", {})[row.unique_key] = {
+                "path": str(word), "validated": True, "complete": True, "attached_at": 1.0}
+
+    def groups(self, rows):
+        seen, result = set(), []
+        for row in rows:
+            key = (material_library.signature_key(row, self.app.cfg), row.lesson_number, row.topic.casefold().strip())
+            if key not in seen:
+                seen.add(key)
+                result.append(row)
+        return result
+
+    def test_every_lesson_of_the_day_is_prepared_even_when_all_already_have_word(self):
+        rows = self.day_rows()
+        self.assertGreaterEqual(len(rows), 5)
+        self.give_everyone_a_word(rows)
+        opened = []
+        with mock.patch("classroom_assistant.chatgpt_ui.open_day_dialog", side_effect=lambda app, lessons: opened.append(lessons)), \
+                mock.patch.object(gui.messagebox, "askyesno", side_effect=AssertionError("зайве запитання!")):
+            self.app.chatgpt_batch()
+        self.assertEqual(len(opened), 1)                                         # вікно відкрилось, а не «усе вже є»
+        expected = self.groups(rows)
+        self.assertEqual([x.unique_key for x in opened[0]], [x.unique_key for x in expected])
+        ktp = [x for x in opened[0] if x.stream.endswith("ВІ") and x.stream.startswith("8-")]
+        self.assertEqual(len(ktp), 1)                                            # 8-Б, 8-В, 8-Г ВІ — одна задача
+        self.assertFalse(any("вже мають Word" in text for text in self.toasts))
+
+    def test_the_dialog_tells_old_word_from_new_and_new_files_replace_old_ones(self):
+        rows = self.day_rows()
+        self.give_everyone_a_word(rows)
+        lessons = self.groups(rows)[:3]
+        dialog = chatgpt_ui.ChatGPTDayDialog(self.app, lessons)
+        self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
+        self.assertEqual([str(dialog.table.item(str(i), "values")[5]) for i in range(3)], ["є", "є", "є"])
+        self.assertIn("«є» — Word уже був", dialog.note.cget("text"))
+        self.assertIn("Word — 0", dialog.note.cget("text"))                        # старі не видають себе за нові
+        self.assertEqual(dialog.checked, {0, 1, 2})                                # усі позначені за замовчуванням
+        old = self.app.state["files"][lessons[0].unique_key]["path"]
+        label = chatgpt_ui._label_for(self.app, lessons[0])
+        name = lesson_base_name(lessons[0], label=label)
+        new_word = make_lecture(Path(self.tmp.name) / (name + ".docx"), f"{label}, Урок")
+        document = Document(new_word)
+        document.add_paragraph("Новий розділ. " + "Додаток до лекції. " * 30)       # інший вміст → інший хеш
+        document.save(new_word)
+        picture = make_picture(Path(self.tmp.name) / (name + ".png"))
+        dialog.docx[0], dialog.images[0] = new_word, [picture]
+        dialog.refresh()
+        self.assertEqual(str(dialog.table.item("0", "values")[5]), "✅")
+        self.assertIn("Word — 1 · зображень — 1", dialog.note.cget("text"))
+        dialog.checked = {0}
+        dialog.attach_all()
+        entry = self.app.state["files"][lessons[0].unique_key]
+        self.assertGreater(entry["attached_at"], 1.0)                             # замінено новим
+        texts = [p.text for p in Document(entry["path"]).paragraphs if p.text.strip()]
+        self.assertTrue(any(x.startswith("Новий розділ.") for x in texts))
+
+    def test_paid_generation_of_explicitly_chosen_lessons_ignores_existing_word_but_default_saves_money(self):
+        rows = self.day_rows()
+        self.give_everyone_a_word(rows)
+        asked, jobs, infos = [], [], []
+        self.app.worker = lambda task, done: jobs.append(task)
+        with mock.patch.object(gui.messagebox, "askyesno", side_effect=lambda t, m, **k: asked.append(m) or True), \
+                mock.patch.object(gui.messagebox, "showinfo", side_effect=lambda t, m, **k: infos.append(m)):
+            self.app.batch_ai(only=rows)                                           # без force — економія
+            self.assertEqual(jobs, [])
+            self.assertTrue(any("вже мають Word" in m for m in infos))
+            self.app.batch_ai(only=rows, force=True)                               # явний вибір у вікні
+        self.assertEqual(len(jobs), 1)
+        self.assertIn("ПЛАТНИХ AI-запитів", asked[-1])
+        self.assertIn("буде замінено", asked[-1])

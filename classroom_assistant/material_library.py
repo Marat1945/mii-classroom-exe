@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import time
 import os
 import re
 import shutil
@@ -201,7 +202,8 @@ def attach_document(item,lessons,state,replace_existing=False,primary=None):
             # Retain confirmed material unless the teacher deliberately chose a replacement.
             if not replace_existing:continue
         new_path=copy_for_lesson(item["path"],lesson,label=same_day_label(lesson,lessons))
-        entry={"path":str(new_path),"validated":True,"complete":True,"library_id":item["id"]}
+        entry={"path":str(new_path),"validated":True,"complete":True,"library_id":item["id"],
+               "attached_at":time.time()}
         if primary is not None and lesson.day!=primary.day:
             entry["from"]=f"{primary.stream}, {primary.day[8:10]}.{primary.day[5:7]}"
             entry["ahead"]=lesson.day>primary.day

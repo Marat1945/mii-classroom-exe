@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import tkinter as tk
 import webbrowser
 from tkinter import ttk, messagebox
@@ -655,6 +656,7 @@ class ChatGPTDayDialog(tk.Toplevel):
         self.docx = {}            # індекс уроку → шлях до Word
         self.images = {}          # індекс уроку → список зображень
         self.unassigned = []
+        self.opened_at = time.time()          # файли, що з'явились ПІСЛЯ відкриття вікна, — нові
         self.escape_closes = True
         day = self.lessons[0].day
         self.title(f"Лекції GPT на весь день — {day[8:10]}.{day[5:7]}.{day[:4]}")
@@ -896,9 +898,17 @@ class ChatGPTDayDialog(tk.Toplevel):
         menu.tk_popup(event.x_root, event.y_root)
         menu.grab_release()
 
+    def _word_state(self, index, lesson):
+        """(Word був раніше, Word новий). Новий — кинутий у вікно або прийшов самотужки вже після його відкриття."""
+        entry = self.app.state.get("files", {}).get(lesson.unique_key, {})
+        has_old = bool(entry.get("complete"))
+        fresh = has_old and float(entry.get("attached_at", 0) or 0) >= self.opened_at
+        return has_old, (index in self.docx) or fresh
+
     def refresh(self):
         selected = self.table.selection()
         words_total = pictures_total = 0
+        any_old = False
         for item in self.table.get_children():
             self.table.delete(item)
         for index, lesson in enumerate(self.lessons):
@@ -906,19 +916,19 @@ class ChatGPTDayDialog(tk.Toplevel):
                 spread = len(self.app._parallel(lesson))
             except Exception:
                 spread = "—"
-            state_entry = self.app.state.get("files", {}).get(lesson.unique_key, {})
-            has_word = index in self.docx or bool(state_entry.get("complete"))
+            has_old, has_new = self._word_state(index, lesson)
             try:
                 from .attachments import files_for_lesson
-                pictures = len(self.images.get(index, [])) or len(
-                    files_for_lesson(self.app.state, lesson.unique_key))
+                pictures = len(self.images.get(index, [])) or (
+                    len(files_for_lesson(self.app.state, lesson.unique_key)) if has_new else 0)
             except Exception:
                 pictures = len(self.images.get(index, []))
-            words_total += has_word
+            words_total += has_new
             pictures_total += pictures
+            any_old = any_old or (has_old and not has_new)
             self.table.insert("", "end", iid=str(index), values=(
                 "☑" if index in self.checked else "☐", lesson.lesson_number, lesson.stream,
-                lesson.topic[:110], spread, "✅" if has_word else "—", pictures or "—"))
+                lesson.topic[:110], spread, "✅" if has_new else ("є" if has_old else "—"), pictures or "—"))
         if selected and self.table.exists(selected[0]):
             self.table.selection_set(selected[0])
         self.unknown.delete(0, "end")
@@ -926,7 +936,8 @@ class ChatGPTDayDialog(tk.Toplevel):
             self.unknown.insert("end", path.name)
         self.counter.config(text=f"Вибрано для лекції: {len(self.checked)} з {len(self.lessons)}")
         self.note.config(text=f"Розпізнано: Word — {words_total} · зображень — {pictures_total}."
-                         + (f" Нерозпізнаних файлів: {len(self.unassigned)}." if self.unassigned else ""),
+                         + (f" Нерозпізнаних файлів: {len(self.unassigned)}." if self.unassigned else "")
+                         + (" «є» — Word уже був, новий файл його замінить." if any_old else ""),
                          foreground="#2E6B30" if words_total else "#33475B")
 
     def attach_all(self):
@@ -938,7 +949,7 @@ class ChatGPTDayDialog(tk.Toplevel):
             lesson = self.lessons[index]
             try:
                 _, attached, skipped = self.app.save_dropped_lecture(
-                    lesson, path, self.images.get(index, []))
+                    lesson, path, self.images.get(index, []), replace_existing=True)
             except Exception as ex:
                 warnings.append(f"{lesson.stream}: {ex}")
                 continue
@@ -949,8 +960,8 @@ class ChatGPTDayDialog(tk.Toplevel):
             if skipped:
                 warnings.append(f"{lesson.stream}: {skipped}")
         pictures = sum(len(v) for v in self.images.values())
-        waiting = [self.lessons[i].stream for i in sorted(self.checked) if i not in self.docx
-                   and not self.app.state.get("files", {}).get(self.lessons[i].unique_key, {}).get("complete")]
+        waiting = [self.lessons[i].stream for i in sorted(self.checked)
+                   if not self._word_state(i, self.lessons[i])[1]]
         self.app.request_sync(1200)                    # Classroom: після прикріплення сама перевірить стан
         if warnings or waiting:
             text = f"Прикріплено: Word — {done}, зображень — {pictures}."
@@ -985,7 +996,7 @@ class ChatGPTDayDialog(tk.Toplevel):
                 f"підписки ChatGPT. Буде не більше {len(chosen)} запитів.\n\nПерейти до нього?", parent=self):
             return
         self.close()
-        self.app.batch_ai(only=chosen)
+        self.app.batch_ai(only=chosen, force=True)
 
     def close(self):
         job = getattr(self, "_poll_job", None)

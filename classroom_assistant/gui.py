@@ -441,7 +441,8 @@ class MainApp(WindowBase):
                 messagebox.showwarning("Word-заготовка","Це НЕ готова лекція. Не надсилайте її учням.")
         self.worker(task,done)
 
-    def batch_ai(self,only=None):
+    def batch_ai(self,only=None,force=False):
+        """Платна генерація. force=True — уроки, обрані явно у вікні «на весь день», генеруються навіть за наявного Word."""
         lessons=[i for i in (self.rows if only is None else only) if i.status=="готово"]
         if not lessons:
             messagebox.showinfo("Розклад","На цю дату немає уроків із перевіреними КТП.");return
@@ -450,22 +451,25 @@ class MainApp(WindowBase):
         for lesson in lessons:
             key=(signature_key(lesson,self.cfg),lesson.lesson_number,
                  lesson.topic.casefold().strip())
-            if lesson.unique_key in self.state.get("files",{}) or key in seen:
+            if (not force and lesson.unique_key in self.state.get("files",{})) or key in seen:
                 continue
             seen.add(key);pending.append(lesson)
         if not pending:
             messagebox.showinfo("Економія API","Усі обрані уроки вже мають Word. Повторної оплати не потрібно.")
             return
         if not messagebox.askyesno("Пакетна генерація",
-              f"Максимум {len(pending)} AI-запитів. Спершу програма повторно використає те, "
-              "що є у бібліотеці.\n\nПісля генерації одна лекція підійде тільки "
+              (f"Буде виконано до {len(pending)} ПЛАТНИХ AI-запитів; наявний Word цих уроків буде замінено новим."
+               if force else
+               f"Максимум {len(pending)} AI-запитів. Спершу програма повторно використає те, "
+               "що є у бібліотеці.")
+              +"\n\nПісля генерації одна лекція підійде тільки "
               "сумісним класам із тією ж темою, програмою та годинами.\nПродовжити?"):
             return
         def task():
             made=[]
             from .ai_writer import generate_full_lesson
             for lesson in pending:
-                existing=find_for_lesson(lesson,self.cfg)
+                existing=None if force else find_for_lesson(lesson,self.cfg)
                 if existing is not None:
                     made.append((lesson,existing))
                     continue
@@ -478,7 +482,7 @@ class MainApp(WindowBase):
         def done(items):
             n=0
             for lesson,item in items:
-                n+=len(attach_document(item,self._parallel(lesson),self.state,primary=lesson))
+                n+=len(attach_document(item,self._parallel(lesson),self.state,replace_existing=force,primary=lesson))
             save_state(self.state);self.update_day()
             show_toast(self,f"✓ AI-лекції готові: груп — {len(items)}, прив'язано до уроків — {n} · перевірте Word",3400)
             self.request_sync(900)
@@ -513,38 +517,21 @@ class MainApp(WindowBase):
         open_chatgpt_dialog(self,[lesson],batch=False,replace_existing=replace)
 
     def chatgpt_batch(self):
+        """Лекції на ВЕСЬ ДЕНЬ: завдання вчителя виконується для всіх уроків дня.
+
+        Одна задача на групу паралелей (однакова тема того ж дня — «8-Б-В-Г ВІ»). Уроки, які вже мають Word
+        (навіть локальний, якого нема в Classroom), НЕ пропускаються: у вікні вони позначені, а нові файли їх замінять.
+        """
         lessons=[i for i in self.rows if i.status=="готово"]
         if not lessons:
             messagebox.showinfo("Розклад","На цю дату немає уроків із перевіреними КТП.");return
-        pending=[];seen=set();reused=0
-        files=self.state.get("files",{})
+        groups=[];seen=set()
         for lesson in lessons:
-            key=(signature_key(lesson,self.cfg),lesson.lesson_number,
-                 lesson.topic.casefold().strip())
-            # Заготовка не є лекцією: для неї теж готуємо повну лекцію.
-            if files.get(lesson.unique_key,{}).get("complete") or key in seen:
-                continue
-            seen.add(key)
-            existing=find_for_lesson(lesson,self.cfg)
-            if existing is not None:
-                reused+=len(attach_document(existing,self._parallel(lesson),self.state))
-                continue
-            pending.append(lesson)
-        if reused:
-            save_state(self.state);self.update_day()
-        if not pending:
-            show_toast(self,"✓ Усі уроки цього дня вже мають Word"
-                       +(f" (з бібліотеки прив'язано: {reused})" if reused else ""),2400)
-            return
-        names="\n".join(f"• {x.period}-й урок — {x.stream}: {x.topic[:70]}" for x in pending)
-        if not messagebox.askyesno("Лекції за день через ChatGPT",
-              (f"З бібліотеки прив'язано готових лекцій: {reused}.\n\n" if reused else "")
-              +f"Нові лекції потрібні для {len(pending)} уроків:\n{names}\n\n"
-              "Програма підготує ОДИН спільний запит для ChatGPT на всі ці уроки; готові файли "
-              "ви перетягнете разом, а програма розкладе їх по уроках. Продовжити?"):
-            return
+            key=(signature_key(lesson,self.cfg),lesson.lesson_number,lesson.topic.casefold().strip())
+            if key in seen:continue
+            seen.add(key);groups.append(lesson)
         from .chatgpt_ui import open_day_dialog
-        open_day_dialog(self,pending)
+        open_day_dialog(self,groups)
 
     def save_chatgpt_lecture(self,lesson,material,replace_existing=False):
         """Word із відповіді ChatGPT → бібліотека → сумісна паралель. Google не змінюється."""
