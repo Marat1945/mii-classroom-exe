@@ -283,7 +283,7 @@ class InfographicSampleTests(TkCase):
         frame = book.nametowidget(book.tabs()[tabs.index("Зразок інфографіки")])
         previews = [w for w in frame.winfo_children() if w.winfo_class() == "TLabel" and w.cget("image")]
         self.assertTrue(previews)                                                          # є мініатюра зразка
-        self.assertIn("перейме композицію карток", samples_ui.INFOGRAPHIC_NOTE)
+        self.assertIn("перейме стиль виконання", samples_ui.INFOGRAPHIC_NOTE)
         saved = []
         buttons = [w for w in frame.winfo_children()[1].winfo_children()]
         with mock.patch.object(samples_ui.filedialog, "asksaveasfilename", return_value=str(__import__("pathlib").Path(__import__("tempfile").mkdtemp()) / "s.jpg")) as ask, \

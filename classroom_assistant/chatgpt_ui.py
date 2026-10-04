@@ -120,6 +120,12 @@ class ChatGPTLectureDialog(tk.Toplevel):
             text=("⬇  Перетягніть сюди з Провідника файли від ChatGPT: Word (.docx) та інфографіку (PNG/JPG)"
                   if DND_FILES else "Файли від ChatGPT додайте кнопкою «Додати файли…» нижче"))
         self.drop_label.pack(fill="x", pady=(6, 2))
+        auto = ttk.Frame(bottom)
+        auto.pack(fill="x", pady=(0, 2))
+        self.auto_label = ttk.Label(auto, text="", wraplength=720, justify="left")
+        self.auto_label.pack(side="left")
+        ttk.Button(auto, text="Куди зберігати файли…", command=self._open_download_setup).pack(side="right")
+        self._refresh_auto_line()
         row = ttk.Frame(bottom)
         row.pack(fill="x")
         self.files_label = ttk.Label(row, text="", foreground="#2E6B30", wraplength=600)
@@ -718,6 +724,12 @@ class ChatGPTDayDialog(tk.Toplevel):
             text=("⬇  Перетягніть сюди ВСІ файли від ChatGPT (Word і картинки) разом"
                   if DND_FILES else "Файли від ChatGPT додайте кнопкою «Додати файли…»"))
         self.drop_label.pack(fill="x")
+        auto = ttk.Frame(bottom)
+        auto.pack(fill="x", pady=(4, 0))
+        self.auto_label = ttk.Label(auto, text="", wraplength=700, justify="left")
+        self.auto_label.pack(side="left")
+        ttk.Button(auto, text="Куди зберігати файли…", command=self._open_download_setup).pack(side="right")
+        self._refresh_auto_line()
         row = ttk.Frame(bottom)
         row.pack(fill="x", pady=4)
         self.note = ttk.Label(row, text="", wraplength=800, foreground="#2E6B30")
@@ -905,6 +917,22 @@ class ChatGPTDayDialog(tk.Toplevel):
         fresh = has_old and float(entry.get("attached_at", 0) or 0) >= self.opened_at
         return has_old, (index in self.docx) or fresh
 
+    def _refresh_auto_line(self):
+        """Рядок стану автоприйому: чи зберігає браузер прямо в папку програми."""
+        try:
+            from . import browser_downloads, lecture_inbox
+            from .download_setup_ui import summary_line
+            from .engine import ROOT
+            text, color = summary_line(browser_downloads.detect(), lecture_inbox.inbox_dir(ROOT),
+                                       lecture_inbox.downloads_dir())
+            self.auto_label.configure(text=text, foreground=color)
+        except Exception:
+            pass
+
+    def _open_download_setup(self):
+        from .download_setup_ui import show_download_setup
+        show_download_setup(self.app)
+
     def refresh(self):
         selected = self.table.selection()
         words_total = pictures_total = 0
@@ -1017,3 +1045,8 @@ class ChatGPTDayDialog(tk.Toplevel):
 
 def open_day_dialog(app, lessons):
     return ChatGPTDayDialog(app, lessons)
+
+
+# Той самий рядок стану автоприйому й кнопка налаштування — і у вікні одного уроку, і у вікні «на весь день».
+ChatGPTLectureDialog._refresh_auto_line = ChatGPTDayDialog._refresh_auto_line
+ChatGPTLectureDialog._open_download_setup = ChatGPTDayDialog._open_download_setup

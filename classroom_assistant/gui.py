@@ -24,7 +24,10 @@ from .theme import apply_theme, make_banner, add_rivets
 from . import connectivity
 from .history import History, describe_change
 from .datepicker import pick_date
-from . import data_tools, file_match, lecture_inbox, wheel
+from . import air_alerts, browser_downloads, data_tools, day_facts, file_match, lecture_inbox, wheel
+from . import app_icon
+from .alert_ui import AlertPanel, show_alert_setup
+from .calendar_leaf import CalendarLeaf
 from .toast import show_toast
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -77,6 +80,8 @@ class MainApp(WindowBase):
         self.state=read_state()
         self.escape_closes=False
         apply_theme(self)
+        app_icon.set_app_id()
+        app_icon.apply(self)                      # логотип замість стандартної пір'їнки Tk
         install_hotkeys(self)
         self.header=make_banner(self,"Помічник учителя Classroom",
                     "розклад  •  календарні плани  •  лекції через ChatGPT  •  чернетки Google Classroom",
@@ -95,10 +100,16 @@ class MainApp(WindowBase):
         self._register_window_drop()
         self._refresh_google_button()
         # прилад на шапці: зв'язок з інтернетом (стрілка й лампочка); у тестах мережу не чіпаємо
+        self.alerts=air_alerts.Monitor(lambda:air_alerts.load_settings(DATA),DATA)
+        self.facts=day_facts.Loader(DATA,network=not os.environ.get("POMICHNYK_NO_OFFERS"))
         self.net=connectivity.Monitor()
         if not os.environ.get("POMICHNYK_NO_OFFERS"):
             self.net.start()
             self._net_job=self.after(1200,self._net_poll)
+            if air_alerts.load_settings(DATA)["key"]:
+                self.alerts.start()
+        self._alert_job=self.after(500,self._alert_poll)
+        self._facts_job=self.after(1500,self._facts_poll)
         self.update_day()
         self.history=History()
         self.history.reset(self._history_snapshot())
@@ -154,6 +165,7 @@ class MainApp(WindowBase):
         for col,width in zip(cols,widths):
             self.grid.heading(col,text=col)
             self.grid.column(col,width=width,minwidth=42,anchor="w",stretch=(col=="Тема"))
+        self.grid.tag_configure("ready",background="#DCE8B8")            # Word є, чернетки ще немає: готово до створення
         self._fit_job=None;self._resize_start=False
         self.grid.bind("<Configure>",lambda _e:self._schedule_fit(),add="+")
         sy=ttk.Scrollbar(table_frame,orient="vertical",command=self.grid.yview)
@@ -199,7 +211,7 @@ class MainApp(WindowBase):
             ("Word і картинки пачкою…",self.choose_lecture_files),
             ("Бібліотека Word",self.library_dialog),
             ("Папка Word",self.open_folder),
-            ("Вхідні файли GPT",self.open_inbox),
+            ("Автоприйом файлів GPT…",self.open_inbox),
         ]:
             actions.add(ttk.Button(actions,text=title,command=callback))
         actions2=FlowRow(outer);actions2.pack(fill="x",pady=2)
@@ -222,11 +234,18 @@ class MainApp(WindowBase):
         ttk.Button(actions3,text="МІЙ CLASSROOM — ПЕРЕГЛЯД",
                    command=self.view_classroom).pack(side="right",padx=4)
         ttk.Label(actions3,text="Плани • розклад • бібліотека • дзвоники • допомога").pack(side="left",padx=10)
-        ttk.Label(outer,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
-        self.desc=tk.Text(outer,height=5,wrap="word",font=("Segoe UI",10))
+        middle=ttk.Frame(outer);middle.pack(fill="both",expand=True)
+        side=ttk.Frame(middle);side.pack(side="right",fill="y",padx=(12,0))      # праворуч: тривога й листочок календаря
+        left=ttk.Frame(middle);left.pack(side="left",fill="both",expand=True)     # ліворуч: повідомлення (вужче, ніж було)
+        self.alert_panel=AlertPanel(side,self.open_alert_setup)
+        self.alert_panel.pack(side="left",padx=(0,10),pady=(10,0))
+        self.leaf=CalendarLeaf(side)
+        self.leaf.pack(side="left",pady=(10,0))
+        ttk.Label(left,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
+        self.desc=tk.Text(left,height=4,wrap="word",font=("Segoe UI",10))
         self.desc.pack(fill="both",expand=True)
         self.desc.bind("<Button-3>",self._description_context_menu)
-        self.attachment_toolbar=ttk.Frame(outer)
+        self.attachment_toolbar=ttk.Frame(left)
         self.attachment_toolbar.pack(fill="x",pady=(5,2))
         ttk.Button(self.attachment_toolbar,text="📎 Додати файли до Classroom",
                    command=self.choose_attachments).pack(side="left",padx=(0,10))
@@ -235,7 +254,7 @@ class MainApp(WindowBase):
                     "Для прикріплення натисніть «Додати файли»"),
               foreground="#245A7C")
         self.drop_hint.pack(side="left")
-        self.attachment_bar=ttk.Frame(outer)
+        self.attachment_bar=ttk.Frame(left)
         self.attachment_bar.pack(fill="x",pady=(2,4))
         self._preview_images=[]
         if DND_FILES:
@@ -254,6 +273,8 @@ class MainApp(WindowBase):
                      hover="#E53935").pack(side="right")
         ttk.Button(bottom,text="↩ Відновити останню копію",
                    command=self.restore_last_backup).pack(side="right",padx=8)
+        bottom.pack_forget()                       # нижній ряд кнопок пакуємо першим (унизу): він не зникне на низьких екранах
+        bottom.pack(side="bottom",fill="x",pady=(7,0),before=middle)
         self.foot=ttk.Label(bottom,text="Без авторизації Google програма працює локально. Публікацію заборонено.",foreground="#46576b")
         self.foot.pack(side="left",fill="x",expand=True)
 
@@ -314,9 +335,12 @@ class MainApp(WindowBase):
                 # Не показувати «чернетка», якщо Google повідомляє PUBLISHED!
                 document_status=(" • Word перевірено" if doc.get("validated") else "")
                 status=remote+document_status
+            ready=bool(doc.get("complete") and not item and not remote and row.status=="готово")
             self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",
-                     row.stream,row.course_title,adjusted.topic,row.lesson_number,status))
+                     row.stream,row.course_title,adjusted.topic,row.lesson_number,status),
+                     tags=(("ready",) if ready else ()))
         self._schedule_fit(0)
+        self._refresh_leaf()
         self.desc.delete("1.0","end")
         if self.rows:
             chosen=next((str(i) for i,x in enumerate(self.rows) if x.unique_key==prior),"0")
@@ -1285,8 +1309,8 @@ class MainApp(WindowBase):
             messagebox.showwarning("Word і зображення",text)
         elif done:
             self.foot.config(text=done[0] if len(done)==1 else self.foot.cget("text"))
-            show_toast(self,f"✓ Розпізнано уроків: {len(done)} · Word: {words} · зображень: {images}",
-                       2400)
+            show_toast(self,f"✓ Розпізнано уроків: {len(done)} · Word: {words} · зображень: {images}"
+                       +(" · зелені рядки готові до чернеток" if words else ""),2800)
         return [] if report_unmatched else unmatched
 
     # ---------- автопідхоплення файлів від GPT ----------
@@ -1296,7 +1320,20 @@ class MainApp(WindowBase):
             sources.append((lecture_inbox.inbox_dir(ROOT),False))
         if self.state.get("watch_downloads",True):
             sources.append((lecture_inbox.downloads_dir(),True))
+            sources.extend((folder,True) for folder in self._browser_folders())      # куди браузер справді зберігає
         return sources
+
+    def _browser_folders(self):
+        """Папки завантажень Chrome/Edge/Brave, окрім «Завантажень» і власної папки (оновлюється раз на хвилину)."""
+        now=time.monotonic()
+        if now-getattr(self,"_bf_ts",-999)>60:
+            self._bf_ts=now
+            try:
+                self._bf=browser_downloads.watch_folders(
+                    browser_downloads.detect(),skip=(lecture_inbox.inbox_dir(ROOT),lecture_inbox.downloads_dir()))
+            except Exception:
+                self._bf=[]
+        return getattr(self,"_bf",[])
 
     def _set_watch(self):
         self.state["watch_downloads"]=bool(self.watch_var.get())
@@ -1304,6 +1341,11 @@ class MainApp(WindowBase):
         show_toast(self,"Стежу за «Завантаженнями»: "+("так" if self.watch_var.get() else "ні"),1800)
 
     def open_inbox(self):
+        """Вікно «Куди зберігати файли від GPT»: прямий запис браузера в папку програми (+ відкрити папку)."""
+        from .download_setup_ui import show_download_setup
+        return show_download_setup(self)
+
+    def open_inbox_folder(self):
         folder=lecture_inbox.inbox_dir(ROOT)
         import subprocess
         if sys.platform=="win32":os.startfile(str(folder))
@@ -1332,7 +1374,8 @@ class MainApp(WindowBase):
                 self._watcher.mark_done(path)
                 if path in matched:
                     if not strict[path]:lecture_inbox.move_to_done(path)      # власна папка: у «Оброблено»
-                elif not strict[path]:unknown.append(path.name)
+                elif not strict[path] and path.suffix.lower()==".docx":
+                    unknown.append(path.name)          # сторонні зображення й архіви в папці тихо лишаємо як є
             if unknown:
                 show_toast(self,"Не вдалося визначити урок для: "+", ".join(unknown[:3])
                            +" · назва має бути «клас, Урок дд.мм — тема»",4200,"warn")
@@ -1354,9 +1397,10 @@ class MainApp(WindowBase):
             except tk.TclError:pass
         try:save_state(self.state)
         except Exception:pass
-        try:self.net.stop()
-        except Exception:pass
-        for name in ("_inbox_job","_poll_job","_net_job"):
+        for monitor in (getattr(self,"net",None),getattr(self,"alerts",None)):
+            try:monitor.stop()
+            except Exception:pass
+        for name in ("_inbox_job","_poll_job","_net_job","_alert_job","_facts_job"):
             job=getattr(self,name,None)
             if job:
                 try:self.after_cancel(job)
@@ -1889,6 +1933,50 @@ class MainApp(WindowBase):
         (інакше діти не зможуть прикріпити відповідь). Галочка «Усе як завдання» вмикає це для всіх."""
         return bool(self.assignment.get()) or is_task_lesson(lesson.topic)
 
+    def open_alert_setup(self):
+        return show_alert_setup(self)
+
+    def alert_settings_changed(self):
+        """Місце або ключ змінено: перечитати налаштування, запустити/пришвидшити перевірку, оновити листочок."""
+        if air_alerts.load_settings(DATA)["key"] and not os.environ.get("POMICHNYK_NO_OFFERS"):
+            self.alerts.start()
+            self.alerts.refresh_soon()
+        self._apply_alert_status()
+        self._refresh_leaf()
+
+    def _apply_alert_status(self):
+        settings=air_alerts.load_settings(DATA)
+        status=self.alerts.status if settings["key"] else air_alerts.fetch_status(settings,DATA)
+        self.alert_panel.show(air_alerts.effective_status(status),air_alerts.place_text(settings["place"]))
+
+    def _alert_poll(self):
+        try:
+            if not self.winfo_exists():return
+            self._apply_alert_status()
+        except tk.TclError:return
+        self._alert_job=self.after(2000,self._alert_poll)
+
+    def _refresh_leaf(self):
+        """Листочок календаря для обраної дати: сонце, Місяць, свята й події (кеш + вбудований список)."""
+        try:
+            day=parse_date(self.datevar.get())
+        except Exception:
+            return
+        lat,lon=air_alerts.place_coordinates(air_alerts.load_settings(DATA)["place"])
+        wiki=day_facts.cached(DATA,day.month,day.day)
+        self.leaf.show(day,lat,lon,self.facts.lookup(day.month,day.day),
+                       "за матеріалами Вікіпедії (CC BY-SA)" if wiki else "вбудований список пам'ятних дат")
+        self.facts.refresh_async(day.month,day.day)
+
+    def _facts_poll(self):
+        try:
+            if not self.winfo_exists():return
+            if self.facts.updated:
+                self.facts.updated.clear()
+                self._refresh_leaf()
+        except tk.TclError:return
+        self._facts_job=self.after(1500,self._facts_poll)
+
     def _net_poll(self):
         try:
             if not self.winfo_exists():return
@@ -2198,4 +2286,5 @@ class MainApp(WindowBase):
         self.worker(task,done)
 
 def launch():
+    app_icon.set_app_id()
     MainApp().mainloop()

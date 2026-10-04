@@ -18,6 +18,8 @@ SUPPORTED = {".docx"} | IMAGE_SUFFIXES
 INBOX_NAME = "Вхідні файли GPT"
 DONE_NAME = "Оброблено"
 ZIP_NAME = re.compile(r"^\d{2}\.\d{2}\.\d{2,4}$")
+ZIP_DATE = re.compile(r"\d{2}[.\-_]\d{2}[.\-_]\d{2,4}")                # дата будь-де в назві: «Лекції 05.10.26.zip»
+MAX_LOOSE_ZIP = 100 * 1024 * 1024                                      # у власній папці великі чужі архіви не чіпаємо
 TEMP_SUFFIXES = (".crdownload", ".tmp", ".part", ".download")
 MAX_FILES = 300
 MAX_TOTAL = 500 * 1024 * 1024
@@ -49,7 +51,8 @@ def downloads_dir() -> Path:
 
 
 def is_zip_for_day(path) -> bool:
-    return Path(path).suffix.lower() == ".zip" and bool(ZIP_NAME.match(clean_stem(path)))
+    """Архів дня: у назві є дата («05.10.26.zip», «Лекції 05.10.26.zip» — ChatGPT інколи додає слова)."""
+    return Path(path).suffix.lower() == ".zip" and bool(ZIP_DATE.search(clean_stem(path)))
 
 
 def extract_archive(zip_path, folder, limit_files=MAX_FILES) -> list:
@@ -107,7 +110,12 @@ def is_candidate(path, strict: bool) -> bool:
     if name.startswith(("~$", ".")) or name.endswith(TEMP_SUFFIXES):
         return False
     if suffix == ".zip":
-        return is_zip_for_day(path) if strict else True
+        if strict or is_zip_for_day(path):
+            return is_zip_for_day(path)
+        try:                                                          # власна папка: будь-який НЕВЕЛИКИЙ архів
+            return path.stat().st_size <= MAX_LOOSE_ZIP
+        except OSError:
+            return False
     if suffix not in SUPPORTED:
         return False
     return parse_name(clean_stem(path)) is not None if strict else True

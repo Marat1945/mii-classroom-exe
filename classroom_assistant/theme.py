@@ -84,6 +84,8 @@ def apply_theme(root):
         else:
             style.map("TButton", background=[("pressed", BUTTON_PRESSED), ("active", BUTTON_HOVER)])
         style.configure("TEntry", fieldbackground=PARCH_LIGHT, foreground=INK, padding=4, bordercolor=EDGE)
+        style.map("TEntry", fieldbackground=[("readonly", PARCH_DARK), ("disabled", PARCH_DARK)],
+                  foreground=[("readonly", INK), ("disabled", MUTED)])
         style.configure("TSpinbox", fieldbackground=PARCH_LIGHT, foreground=INK, padding=3, bordercolor=EDGE)
         style.configure("TCombobox", fieldbackground=PARCH_LIGHT, background=BRASS, foreground=INK, padding=4,
                         arrowsize=15, bordercolor=EDGE)

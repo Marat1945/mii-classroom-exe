@@ -16,7 +16,8 @@ from .engine import DATA, ROOT
 
 SKIP_DIRS = {".git", ".github", "classroom_assistant", "tests", "__pycache__", "build", "dist",
              "venv", ".venv", ".pytest_cache", "Резервні копії"}
-SECRET_NAMES = {"google_credentials.json", "credentials.json", "token.json", "install_state.json"}
+SECRET_NAMES = {"google_credentials.json", "credentials.json", "token.json", "install_state.json",
+                "air_alert.json", "air_alert_regions.json", "day_facts_cache.json"}      # ключ тривоги й кеші не йдуть у копії
 # Що вважається «даними вчителя» і очищується разом із розкладом та КТП.
 WIPE_DIRS = ("Готові Word", "Вкладення Classroom", "Бібліотека уроків")
 RESTORE_DIRS = WIPE_DIRS + ("data", "Архів навчальних даних", "КТП джерела")

@@ -441,8 +441,8 @@ class InfographicAndHelpTests(unittest.TestCase):
     def test_infographic_requirements_for_a_lecture(self):
         from classroom_assistant.chatgpt_bridge import build_prompt
         text = build_prompt(self.lesson("Особливості розвитку культури"))
-        for needle in ("ВИМОГИ ДО ІНФОГРАФІКИ", "1536×1024", "ОРИГІНАЛЬНА для цього уроку", "«Ключові дати»",
-                       "«Причини → наслідки»", "ТОЧНІСТЬ — найважливіше", "вичитай КОЖНЕ слово українською",
+        for needle in ("ВИМОГИ ДО ІНФОГРАФІКИ", "1536×1024", "ОРИГІНАЛЬНА для цього уроку", "ЖИВА ІЛЮСТРОВАНА",
+                       "КОМПОЗИЦІЯ — «", "ТОЧНІСТЬ — найважливіше", "вичитай КОЖНЕ слово українською",
                        "переймай ЛИШЕ стиль", "не вигадуй фактів"):
             self.assertIn(needle, text, needle)
         self.assertNotIn("«Мета роботи»", text)

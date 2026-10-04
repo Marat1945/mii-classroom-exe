@@ -219,3 +219,27 @@ def mortarboard_image(size=40):
     d.line((35 * s, 17 * s, 35 * s, 30 * s), fill=cream, width=int(1.6 * s))
     d.ellipse((33 * s, 29 * s, 37 * s, 34 * s), fill=cream)
     return img.resize((size, size), Image.LANCZOS)
+
+
+def alert_icon(color, size=112):
+    """Бомбочка в кольоровому колі (як на сповіщенні «Повітряна тривога»): носом донизу праворуч."""
+    big = size * SCALE
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse((0, 0, big - 1, big - 1), fill=tuple(color) + (255,))
+    unit = big / 100
+    bomb = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(bomb)
+    ink = (22, 22, 22, 255)
+
+    def p(*points):
+        return [(x * unit, y * unit) for x, y in points]
+    d.rounded_rectangle([x * unit for x in (22, 39, 64, 61)], radius=9 * unit, fill=ink)       # корпус
+    d.polygon(p((58, 39), (86, 50), (58, 61)), fill=ink)                                        # носова частина
+    d.polygon(p((22, 39), (13, 22), (31, 22), (36, 39)), fill=ink)                              # верхній стабілізатор
+    d.polygon(p((22, 61), (13, 78), (31, 78), (36, 61)), fill=ink)                              # нижній стабілізатор
+    d.line([x * unit for x in (60, 39, 60, 61)], fill=tuple(color) + (255,), width=max(2, int(3 * unit)))   # смужка
+    bomb = bomb.rotate(-45, resample=Image.BICUBIC, center=(big / 2, big / 2))
+    scaled = int(big * 0.78)
+    bomb = bomb.resize((scaled, scaled), Image.LANCZOS)
+    img.alpha_composite(bomb, ((big - scaled) // 2, (big - scaled) // 2))
+    return img.resize((size, size), Image.LANCZOS)
