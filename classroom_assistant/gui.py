@@ -20,7 +20,8 @@ from .attachments import add_attachments, files_for_lesson, copy_attachments, re
 from .window_ui import maximize_work_window, fit_work_window
 from .ui_kit import AccentButton, FlowRow
 from .hotkeys import install_hotkeys
-from .theme import apply_theme, make_banner
+from .theme import apply_theme, make_banner, add_rivets
+from . import connectivity
 from .history import History, describe_change
 from .datepicker import pick_date
 from . import data_tools, file_match, lecture_inbox, wheel
@@ -77,9 +78,11 @@ class MainApp(WindowBase):
         self.escape_closes=False
         apply_theme(self)
         install_hotkeys(self)
-        make_banner(self,"🎓  Помічник учителя Classroom",
+        self.header=make_banner(self,"Помічник учителя Classroom",
                     "розклад  •  календарні плани  •  лекції через ChatGPT  •  чернетки Google Classroom",
-                    author="Розробник програми — вчитель історії Пасічник Іван Олегович").pack(fill="x")
+                    author="Розробник програми — вчитель історії Пасічник Іван Олегович",
+                    animate=not os.environ.get("POMICHNYK_NO_OFFERS"))
+        self.header.pack(fill="x",pady=(0,6))
         self._sync_running=False;self._sync_again=False;self._last_sync_ts=0.0
         self._inbox_busy=False;self._last_matched_sources=set()
         self.rows=[]
@@ -88,8 +91,14 @@ class MainApp(WindowBase):
         self.remote_classroom_entries={}
         self._plans_sig=None;self._plans_digest="";self._plans_store={}
         self._build()
+        add_rivets(self)
         self._register_window_drop()
         self._refresh_google_button()
+        # прилад на шапці: зв'язок з інтернетом (стрілка й лампочка); у тестах мережу не чіпаємо
+        self.net=connectivity.Monitor()
+        if not os.environ.get("POMICHNYK_NO_OFFERS"):
+            self.net.start()
+            self._net_job=self.after(1200,self._net_poll)
         self.update_day()
         self.history=History()
         self.history.reset(self._history_snapshot())
@@ -1345,7 +1354,9 @@ class MainApp(WindowBase):
             except tk.TclError:pass
         try:save_state(self.state)
         except Exception:pass
-        for name in ("_inbox_job","_poll_job"):
+        try:self.net.stop()
+        except Exception:pass
+        for name in ("_inbox_job","_poll_job","_net_job"):
             job=getattr(self,name,None)
             if job:
                 try:self.after_cancel(job)
@@ -1877,6 +1888,13 @@ class MainApp(WindowBase):
         """Лекція → «Матеріал». Практична, лабораторна, контрольна, проєктна робота, оцінювання → «Завдання»
         (інакше діти не зможуть прикріпити відповідь). Галочка «Усе як завдання» вмикає це для всіх."""
         return bool(self.assignment.get()) or is_task_lesson(lesson.topic)
+
+    def _net_poll(self):
+        try:
+            if not self.winfo_exists():return
+            self.header.set_online(self.net.online)
+        except tk.TclError:return
+        self._net_job=self.after(1000,self._net_poll)
 
     def request_sync(self,delay=900):
         """Перевірити Classroom після змін (чернетки, розклад): якщо синхронізація йде — повторити по завершенню."""

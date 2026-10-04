@@ -1,104 +1,141 @@
-"""Єдине оформлення програми: кольори, шрифти, таблиці, вкладки, шапка.
+"""Єдине оформлення програми: «старий прилад» — металева рамка, пергаментні поля, латунні кнопки.
 
-Тільки стандартні засоби Tk/ttk (тема «clam»), без додаткових бібліотек,
-тож це не ускладнює збірку EXE. Якщо щось піде не так — програма
-працює зі звичайним виглядом.
+Усе робиться стандартними засобами Tk/ttk і Pillow (текстури малюються в пам'яті), тож збірка EXE не ускладнюється.
+Якщо Pillow недоступний — програма працює з простим плоским виглядом тих самих кольорів.
 """
 from __future__ import annotations
+
 import sys
 import tkinter as tk
 from tkinter import ttk
 
-BG = "#EEF3F8"
-CARD = "#FFFFFF"
-INK = "#1B2A3A"
-MUTED = "#4B5F73"
-BORDER = "#C3D2E0"
-BUTTON = "#DCE8F5"
-BUTTON_HOVER = "#C6DAF0"
-BUTTON_PRESSED = "#B1CCE8"
-ACCENT = "#1F6FB2"
-ACCENT_DARK = "#164F82"
-SELECT = "#2E7BC4"
-HEADING = "#D3E2F1"
-BANNER_FROM = (31, 78, 121)
-BANNER_TO = (46, 123, 196)
+from . import retro_assets as assets
+
+# --- палітра (знята зі зразка-макета) ---
+METAL = "#566258"
+METAL_DARK = "#2F3631"
+METAL_LIGHT = "#8A9585"
+PARCH = "#E9DDBF"
+PARCH_LIGHT = "#F4ECD6"
+PARCH_DARK = "#CDBE9A"
+BRASS = "#D4C497"
+EDGE = "#3A3127"
+INK = "#2A2118"
+MUTED = "#5E5039"
+NAVY = "#1D4A7D"
+NAVY_HOVER = "#2A62A0"
+GREEN = "#1E6B46"
+GREEN_HOVER = "#2A865A"
+SELECT = "#3E7DBA"
+CREAM = "#F2E9CC"
+
+# --- сумісні назви (їх очікують інші модулі) ---
+BG = PARCH
+CARD = PARCH_LIGHT
+BORDER = EDGE
+BUTTON = BRASS
+BUTTON_HOVER = "#E2D5AB"
+BUTTON_PRESSED = "#B7A57A"
+ACCENT = NAVY
+ACCENT_DARK = "#143A63"
+HEADING = "#D2C196"
+BANNER_FROM = (47, 54, 49)
+BANNER_TO = (86, 98, 88)
 
 FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
+TITLE_FONT = "Georgia" if sys.platform == "win32" else "DejaVu Serif"
+BORDER_WIDTH = 12
+
+_KEEP = []                                           # посилання на зображення: без них Tk їх «забуває»
+
+
+def _image_buttons(style):
+    states = {s: assets.photo(assets.button_image(s)) for s in ("normal", "hover", "pressed", "disabled")}
+    _KEEP.extend(states.values())
+    style.element_create("Retro.Button.plate", "image", states["normal"],
+                         ("disabled", states["disabled"]), ("pressed", states["pressed"]),
+                         ("active", states["hover"]), border=(10, 10, 10, 10), sticky="nswe")
+    style.layout("TButton", [("Retro.Button.plate", {"sticky": "nswe", "children": [
+        ("Button.padding", {"sticky": "nswe", "children": [("Button.label", {"sticky": "nswe"})]})]})])
 
 
 def apply_theme(root):
-    """Застосувати кольори до всієї програми (один раз, на головному вікні)."""
+    """Застосувати вигляд до всієї програми (один раз, на головному вікні)."""
     try:
         style = ttk.Style(root)
         style.theme_use("clam")
-        style.configure(".", background=BG, foreground=INK, font=(FONT, 10),
-                        bordercolor=BORDER, lightcolor=BG, darkcolor=BG, troughcolor=BORDER)
-        style.configure("TFrame", background=BG)
-        style.configure("TLabel", background=BG, foreground=INK)
-        style.configure("TCheckbutton", background=BG, foreground=INK)
-        style.map("TCheckbutton", background=[("active", BG)])
-        style.configure("TLabelframe", background=BG, bordercolor=BORDER)
-        style.configure("TLabelframe.Label", background=BG, foreground=ACCENT_DARK,
-                        font=(FONT, 10, "bold"))
-        style.configure("TButton", background=BUTTON, foreground=INK, padding=(11, 5),
-                        borderwidth=1, relief="flat", focusthickness=1, focuscolor=ACCENT)
-        style.map("TButton",
-                  background=[("pressed", BUTTON_PRESSED), ("active", BUTTON_HOVER),
-                              ("disabled", "#E6ECF2")],
-                  foreground=[("disabled", "#8A99A8")],
-                  bordercolor=[("active", ACCENT)])
-        style.configure("TEntry", fieldbackground=CARD, padding=4, bordercolor=BORDER)
-        style.configure("TCombobox", fieldbackground=CARD, background=BUTTON, padding=4,
-                        arrowsize=15, bordercolor=BORDER)
-        style.map("TCombobox", fieldbackground=[("readonly", CARD)],
-                  selectbackground=[("readonly", CARD)], selectforeground=[("readonly", INK)])
-        style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(2, 6, 2, 0))
-        style.configure("TNotebook.Tab", background=BUTTON, foreground=INK, padding=(16, 7),
-                        font=(FONT, 10, "bold"), borderwidth=1)
-        style.map("TNotebook.Tab",
-                  background=[("selected", CARD), ("active", BUTTON_HOVER)],
-                  foreground=[("selected", ACCENT_DARK)])
-        style.configure("Treeview", background=CARD, fieldbackground=CARD, foreground=INK,
-                        rowheight=27, borderwidth=1, bordercolor=BORDER)
-        style.map("Treeview", background=[("selected", SELECT)],
-                  foreground=[("selected", "white")])
-        style.configure("Treeview.Heading", background=HEADING, foreground=ACCENT_DARK,
-                        font=(FONT, 10, "bold"), padding=(6, 6), relief="flat",
-                        borderwidth=1, bordercolor=BORDER)
-        style.map("Treeview.Heading", background=[("active", BUTTON_HOVER)])
-        style.configure("TScrollbar", background=BUTTON, troughcolor=BG, bordercolor=BG,
-                        arrowcolor=ACCENT_DARK)
-        style.configure("TPanedwindow", background=BG)
-        style.configure("Sash", background=BORDER)
+        style.configure(".", background=PARCH, foreground=INK, font=(FONT, 10), bordercolor=EDGE,
+                        lightcolor=PARCH_LIGHT, darkcolor=PARCH_DARK, troughcolor=PARCH_DARK)
+        style.configure("TFrame", background=PARCH)
+        style.configure("TLabel", background=PARCH, foreground=INK)
+        style.configure("TCheckbutton", background=PARCH, foreground=INK)
+        style.map("TCheckbutton", background=[("active", PARCH)])
+        style.configure("TRadiobutton", background=PARCH, foreground=INK)
+        style.configure("TLabelframe", background=PARCH, bordercolor=EDGE)
+        style.configure("TLabelframe.Label", background=PARCH, foreground=NAVY, font=(FONT, 10, "bold"))
+        style.configure("TButton", background=BRASS, foreground=INK, padding=(6, 3), borderwidth=0,
+                        relief="flat", font=(FONT, 10, "bold"), focusthickness=0)
+        style.map("TButton", foreground=[("disabled", "#8E8566"), ("pressed", INK)])
+        if assets.available():
+            try:
+                _image_buttons(style)
+            except tk.TclError:
+                style.map("TButton", background=[("pressed", BUTTON_PRESSED), ("active", BUTTON_HOVER)])
+        else:
+            style.map("TButton", background=[("pressed", BUTTON_PRESSED), ("active", BUTTON_HOVER)])
+        style.configure("TEntry", fieldbackground=PARCH_LIGHT, foreground=INK, padding=4, bordercolor=EDGE)
+        style.configure("TSpinbox", fieldbackground=PARCH_LIGHT, foreground=INK, padding=3, bordercolor=EDGE)
+        style.configure("TCombobox", fieldbackground=PARCH_LIGHT, background=BRASS, foreground=INK, padding=4,
+                        arrowsize=15, bordercolor=EDGE)
+        style.map("TCombobox", fieldbackground=[("readonly", PARCH_LIGHT)],
+                  selectbackground=[("readonly", PARCH_LIGHT)], selectforeground=[("readonly", INK)])
+        style.configure("TNotebook", background=PARCH, borderwidth=0, tabmargins=(2, 6, 2, 0))
+        style.configure("TNotebook.Tab", background=PARCH_DARK, foreground=INK, padding=(16, 7),
+                        font=(FONT, 10, "bold"), borderwidth=1, bordercolor=EDGE)
+        style.map("TNotebook.Tab", background=[("selected", PARCH_LIGHT), ("active", BRASS)],
+                  foreground=[("selected", NAVY)])
+        style.configure("Treeview", background=PARCH_LIGHT, fieldbackground=PARCH_LIGHT, foreground=INK,
+                        rowheight=27, borderwidth=2, bordercolor=EDGE)
+        style.map("Treeview", background=[("selected", SELECT)], foreground=[("selected", "white")])
+        style.configure("Treeview.Heading", background=HEADING, foreground=INK, font=(FONT, 10, "bold"),
+                        padding=(6, 6), relief="raised", borderwidth=1, bordercolor=EDGE,
+                        lightcolor="#EBDFB8", darkcolor="#9C8A5E")
+        style.map("Treeview.Heading", background=[("active", BRASS)])
+        style.configure("TScrollbar", background=BRASS, troughcolor=PARCH_DARK, bordercolor=EDGE, arrowcolor=INK)
+        style.configure("TPanedwindow", background=PARCH)
+        style.configure("Sash", background=EDGE)
     except tk.TclError:
         return False
-    # Звичайні (не ttk) віджети: вікна, поля тексту, списки.
+    # Звичайні (не ttk) віджети: вікна з металевою рамкою, пергаментні поля тексту, списки, меню.
     try:
-        root.configure(background=BG)
-        root.option_add("*Toplevel.background", BG)
-        root.option_add("*Text.background", CARD)
+        root.configure(background=METAL, bd=BORDER_WIDTH, relief="ridge")
+        root.option_add("*Toplevel.background", METAL)
+        root.option_add("*Toplevel.borderWidth", BORDER_WIDTH)
+        root.option_add("*Toplevel.relief", "ridge")
+        root.option_add("*Text.background", PARCH_LIGHT)
         root.option_add("*Text.foreground", INK)
         root.option_add("*Text.selectBackground", SELECT)
         root.option_add("*Text.selectForeground", "white")
         root.option_add("*Text.relief", "solid")
         root.option_add("*Text.borderWidth", 1)
         root.option_add("*Text.highlightThickness", 1)
-        root.option_add("*Text.highlightBackground", BORDER)
-        root.option_add("*Text.highlightColor", ACCENT)
-        root.option_add("*Listbox.background", CARD)
+        root.option_add("*Text.highlightBackground", EDGE)
+        root.option_add("*Text.highlightColor", NAVY)
+        root.option_add("*Listbox.background", PARCH_LIGHT)
         root.option_add("*Listbox.foreground", INK)
+        root.option_add("*Listbox.selectBackground", SELECT)
+        root.option_add("*Listbox.selectForeground", "white")
         root.option_add("*Listbox.relief", "solid")
         root.option_add("*Listbox.borderWidth", 1)
         root.option_add("*Listbox.highlightThickness", 0)
-        root.option_add("*Menu.background", CARD)
+        root.option_add("*Menu.background", PARCH)
         root.option_add("*Menu.foreground", INK)
         root.option_add("*Menu.activeBackground", SELECT)
         root.option_add("*Menu.activeForeground", "white")
-        root.option_add("*Menu.relief", "flat")
-        root.option_add("*Menu.borderWidth", 1)
-        root.option_add("*Canvas.background", BG)
-        root.option_add("*TCombobox*Listbox.background", CARD)
+        root.option_add("*Menu.relief", "raised")
+        root.option_add("*Menu.borderWidth", 2)
+        root.option_add("*Canvas.background", PARCH)
+        root.option_add("*TCombobox*Listbox.background", PARCH_LIGHT)
         root.option_add("*TCombobox*Listbox.selectBackground", SELECT)
         root.option_add("*TCombobox*Listbox.selectForeground", "white")
     except tk.TclError:
@@ -106,29 +143,23 @@ def apply_theme(root):
     return True
 
 
-def make_banner(parent, title, subtitle="", author=""):
-    """Шапка з плавним градієнтом і назвою програми."""
-    height = 52
-    canvas = tk.Canvas(parent, height=height, highlightthickness=0, bd=0)
+def add_rivets(window):
+    """Чотири заклепки в кутах металевої рамки вікна (place: не заважає розкладці вмісту)."""
+    if not assets.available() or getattr(window, "_rivets", None):
+        return
+    try:
+        image = assets.photo(assets.rivet_image(BORDER_WIDTH), window)
+        labels = []
+        for relx, rely, anchor in ((0, 0, "nw"), (1, 0, "ne"), (0, 1, "sw"), (1, 1, "se")):
+            label = tk.Label(window, image=image, bd=0, highlightthickness=0, bg=METAL)
+            label.place(relx=relx, rely=rely, anchor=anchor)
+            labels.append(label)
+        window._rivets = (image, labels)
+    except tk.TclError:
+        pass
 
-    def draw(_event=None):
-        width = max(canvas.winfo_width(), 400)
-        canvas.delete("all")
-        steps = 64
-        for i in range(steps):
-            ratio = i / (steps - 1)
-            color = "#%02x%02x%02x" % tuple(
-                int(a + (b - a) * ratio) for a, b in zip(BANNER_FROM, BANNER_TO))
-            canvas.create_rectangle(width * i / steps, 0, width * (i + 1) / steps + 1, height,
-                                    fill=color, outline=color)
-        canvas.create_text(20, 19, anchor="w", text=title, fill="white",
-                           font=(FONT, 16, "bold"))
-        if subtitle:
-            canvas.create_text(22, 39, anchor="w", text=subtitle, fill="#D6E7F7",
-                               font=(FONT, 9))
-        if author:                                           # під хрестиком закриття вікна
-            canvas.create_text(width - 18, 39, anchor="e", text=author, fill="#E3EEF9", font=(FONT, 9, "bold"))
-        canvas.create_line(0, height - 1, width, height - 1, fill=ACCENT_DARK)
 
-    canvas.bind("<Configure>", draw)
-    return canvas
+def make_banner(parent, title, subtitle="", author="", animate=True):
+    """Шапка-прилад: циферблат, лампочка зв'язку, назва, що переливається, табличка автора."""
+    from .retro_header import InstrumentHeader
+    return InstrumentHeader(parent, title, subtitle, author, animate=animate)

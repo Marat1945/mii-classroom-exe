@@ -190,14 +190,16 @@ class DateWheelAndBannerTests(TkCase):
         with ExitStack() as stack:
             app = gui.MainApp()
             self.addCleanup(app.destroy)
-            app.update()
+            for _ in range(15):                                              # шапка малюється з невеликою затримкою
+                app.update()
+                time.sleep(0.02)
             texts = []
             for child in app.winfo_children():
                 if child.winfo_class() == "Canvas":
                     for item in child.find_all():
                         if child.type(item) == "text":
                             texts.append(child.itemcget(item, "text"))
-            self.assertIn("Розробник програми — вчитель історії Пасічник Іван Олегович", texts)
+            self.assertIn("Розробник програми — вчитель історії Пасічник Іван Олегович", [" ".join(x.split()) for x in texts])
             self.assertTrue(any("Помічник учителя Classroom" in x for x in texts))
 
 

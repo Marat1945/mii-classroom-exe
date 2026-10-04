@@ -87,18 +87,17 @@ def _set_text(paragraph,text):
 
 
 def ensure_closing(doc,lesson):
-    """Завершення, як у вашому зразку: «Техніка безпеки» (рожевий блок) і «Д/з» останнім рядком.
+    """Завершення Word: лише «Техніка безпеки» (рожевий блок).
 
-    ChatGPT цього не пише (програма додає сама), а Д/з завжди береться лише з КТП.
+    Домашнє завдання в Word НЕ пишеться: воно є тільки в повідомленні Classroom, тож документ годиться
+    й для інших цілей. Старі абзаци «Д/з: …» (зокрема додані попередніми версіями) прибираються.
     """
-    homework="Д/з: "+(lesson.homework or "Не зазначено у КТП — уточнити у вчителя.")
     paragraphs=list(doc.paragraphs)
-    has_safety=any(p.text.strip().casefold()=="техніка безпеки" for p in paragraphs)
-    existing=[p for p in paragraphs if _HOMEWORK.match(p.text)]
-    if not has_safety:
-        for paragraph in existing:                       # зайве Д/з посеред тексту — прибрати
+    for paragraph in paragraphs:
+        if _HOMEWORK.match(paragraph.text):
             paragraph._p.getparent().remove(paragraph._p)
-        existing=[]
+    has_safety=any(p.text.strip().casefold()=="техніка безпеки" for p in paragraphs)
+    if not has_safety:
         try:
             doc.add_heading("Техніка безпеки",1)
         except KeyError:
@@ -109,9 +108,4 @@ def ensure_closing(doc,lesson):
         cell._tc.get_or_add_tcPr().append(shade_cell)
         run=cell.paragraphs[0].add_run(SAFETY_TEXT)
         run.font.name="Times New Roman";run.font.size=Pt(13.5)
-    if existing:
-        _set_text(existing[-1],homework)
-        return doc
-    run=doc.add_paragraph().add_run(homework)
-    run.bold=True;run.font.name="Times New Roman";run.font.size=Pt(14)
     return doc

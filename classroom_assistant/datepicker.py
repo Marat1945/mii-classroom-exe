@@ -111,9 +111,9 @@ class CalendarDialog(tk.Toplevel):
                 is_selected = day == self.selected
                 button = tk.Button(
                     self.body, text=str(day.day), width=4, relief="flat", bd=0, pady=4,
-                    bg=ACCENT if is_selected else (SOFT if day == today else "white"),
-                    fg="white" if is_selected else (("#1B2A3A" if inside else MUTED) if allowed else "#C9D2DB"),
-                    activebackground="#2E7BC4", activeforeground="white",
+                    bg=ACCENT if is_selected else (SOFT if day == today else "#F4ECD6"),
+                    fg="#F2E9CC" if is_selected else (("#2A2118" if inside else MUTED) if allowed else "#B8AA88"),
+                    activebackground="#3E7DBA", activeforeground="white",
                     state="normal" if allowed else "disabled",
                     cursor="hand2" if allowed else "arrow",
                     command=lambda d=day: self.choose(d))

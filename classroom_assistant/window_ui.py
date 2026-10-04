@@ -43,6 +43,11 @@ def fit_work_window(window,kind="normal",minimum=None):
     """
     ratio_w,ratio_h,min_w,min_h=SIZE_PRESETS[kind]
     if minimum:min_w,min_h=minimum
+    try:
+        from .theme import add_rivets
+        add_rivets(window)                               # заклепки в кутах металевої рамки
+    except Exception:
+        pass
 
     def apply():
         try:

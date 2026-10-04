@@ -14,7 +14,7 @@ def show_toast(parent, text, ms=2400, kind="ok"):
             toast.attributes("-topmost", True)
         except tk.TclError:
             pass
-        colors = {"ok": ("#1F4E79", "white"), "warn": ("#9B6A00", "white")}
+        colors = {"ok": ("#2F3631", "#F2E9CC"), "warn": ("#7A5200", "#F2E9CC")}
         background, foreground = colors.get(kind, colors["ok"])
         label = tk.Label(toast, text=text, bg=background, fg=foreground, font=("Segoe UI", 11, "bold"),
                          padx=20, pady=11, justify="left", wraplength=860)

@@ -131,7 +131,7 @@ class NamingTests(unittest.TestCase):
             copy_doc = Document(result)
             paragraphs = [p.text for p in copy_doc.paragraphs if p.text.strip()]
             self.assertEqual(paragraphs[0], "Урок № 9 • 09.10.2026")
-            self.assertEqual(paragraphs[-1], "Д/з: параграф 9")
+            self.assertFalse(any(x.startswith("Д/з") for x in paragraphs))          # домашнього завдання в Word немає
             self.assertIn("09.10.2026", copy_doc.sections[0].header.paragraphs[0].text)
             self.assertNotIn("02.10.2026", copy_doc.sections[0].header.paragraphs[0].text)
 

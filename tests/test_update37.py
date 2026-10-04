@@ -452,24 +452,26 @@ class WordClosingAndDataTests(unittest.TestCase):
             doc.add_paragraph("Д/з: старе")
         return doc
 
-    def test_closing_block_matches_the_sample_and_is_idempotent(self):
+    def test_closing_block_has_safety_but_never_homework_and_is_idempotent(self):
         lesson = replace(day_lessons("2026-10-01", read_json("Налаштування.json"))[0], homework="прочитати § 5")
         doc = documents.ensure_closing(self.lecture(), lesson)
         texts = [p.text for p in doc.paragraphs if p.text.strip()]
-        self.assertEqual(texts[-2], "Техніка безпеки")
-        self.assertEqual(texts[-1], "Д/з: прочитати § 5")
+        self.assertEqual(texts[-1], "Техніка безпеки")
+        self.assertFalse(any(x.startswith("Д/з") for x in texts))                  # домашнє завдання лише в Classroom
         fills = {sh.get(qn("w:fill")) for tc in doc.element.body.iter(qn("w:tc")) for sh in tc.iter(qn("w:shd"))}
         self.assertIn("FCE8E6", fills)
         documents.ensure_closing(doc, replace(lesson, homework="інше"))
         texts = [p.text for p in doc.paragraphs if p.text.strip()]
         self.assertEqual(texts.count("Техніка безпеки"), 1)
-        self.assertEqual(texts.count("Д/з: інше"), 1)
-        self.assertEqual(sum(t.startswith("Д/з") for t in texts), 1)
+        self.assertFalse(any(x.startswith("Д/з") for x in texts))
 
-    def test_old_homework_in_the_middle_is_replaced(self):
+    def test_old_homework_paragraphs_are_removed_from_the_word(self):
         lesson = replace(day_lessons("2026-10-01", read_json("Налаштування.json"))[0], homework="нове")
-        doc = documents.ensure_closing(self.lecture(with_closing=False), lesson)
-        self.assertEqual([p.text for p in doc.paragraphs if p.text.strip()][-1], "Д/з: нове")
+        doc = documents.ensure_closing(self.lecture(with_closing=True), lesson)       # у файлі було «Д/з: старе»
+        texts = [p.text for p in doc.paragraphs if p.text.strip()]
+        self.assertFalse(any("Д/з" in x for x in texts))
+        self.assertEqual(texts.count("Техніка безпеки"), 1)
+        self.assertTrue(any(x.startswith("Розділ 7.") for x in texts))               # зміст лекції не зачеплено
 
     def test_parallel_copy_updates_dates_in_short_header_and_first_line(self):
         lesson = replace(day_lessons("2026-10-01", read_json("Налаштування.json"))[0],
@@ -484,7 +486,7 @@ class WordClosingAndDataTests(unittest.TestCase):
             self.assertEqual(copy_doc.sections[0].header.paragraphs[0].text, "ВСЕСВІТНЯ ІСТОРІЯ • 11 КЛАС • 09.10")
             self.assertEqual([p.text for p in copy_doc.paragraphs if p.text.strip()][0],
                              f"{lesson.stream}, Урок 09.10 — Тема")
-            self.assertEqual([p.text for p in copy_doc.paragraphs if p.text.strip()][-1], "Д/з: параграф 9")
+            self.assertFalse(any(p.text.startswith("Д/з") for p in copy_doc.paragraphs))
 
     def test_clean_install_creates_blank_data_without_overwriting(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -523,7 +525,8 @@ class NewPromptTests(unittest.TestCase):
         self.assertIn("Рівно ОДНЕ зображення", prompt)
         self.assertIn("ІСТОРІЯ УКРАЇНИ • 11 КЛАС • 01.10", prompt)
         self.assertIn("«Основні поняття»", prompt)
-        self.assertIn("НЕ додавай розділи «Техніка безпеки» та «Д/з»", prompt)
+        self.assertIn("НЕ додавай розділ «Домашнє завдання / Д/з»", prompt)
+        self.assertIn("Розділ «Техніка безпеки» додасть програма", prompt)
         self.assertNotIn("## Назва першого розділу", prompt)
         self.assertIn("## Назва першого розділу", build_prompt(lesson, None, "text"))
 

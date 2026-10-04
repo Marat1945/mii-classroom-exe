@@ -70,7 +70,7 @@ class Version3Tests(unittest.TestCase):
                     self.assertTrue(path.exists())
                     txt='\n'.join(p.text for p in Document(path).paragraphs)
                     self.assertIn('Урок '+x.day[8:10]+'.'+x.day[5:7]+' — '+x.topic,txt)
-                    self.assertIn('Д/з: '+x.homework,txt)
+                    self.assertNotIn('Д/з',txt)                      # старе «Д/з» прибрано, нового Word не містить
                     self.assertTrue(state['files'][x.unique_key]['validated'])
                 self.assertEqual(lib.attach_document(item,matches,state),[ ])
                 self.assertEqual(len(lib.attach_document(item,matches,state,replace_existing=True)),3)

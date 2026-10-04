@@ -3,10 +3,10 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-ACCENT="#1F6FB2"
-ACCENT_HOVER="#2B86D1"
-ACCENT_DARK="#164F82"
-SOFT="#EAF2FA"
+ACCENT="#1D4A7D"
+ACCENT_HOVER="#2A62A0"
+ACCENT_DARK="#143A63"
+SOFT="#EFE6CB"
 
 
 class AccentButton(tk.Button):
@@ -14,9 +14,9 @@ class AccentButton(tk.Button):
 
     def __init__(self,master,text,command=None,color=ACCENT,hover=ACCENT_HOVER,**kw):
         font=kw.pop("font",("Segoe UI",10,"bold"))
-        super().__init__(master,text=text,command=command,bg=color,fg="white",
-                         activebackground=ACCENT_DARK,activeforeground="white",
-                         relief="flat",bd=0,padx=16,pady=7,font=font,
+        super().__init__(master,text=text,command=command,bg=color,fg="#F2E9CC",
+                         activebackground=ACCENT_DARK,activeforeground="#F2E9CC",
+                         relief="raised",bd=3,padx=14,pady=5,font=font,          # опукла металева пластина
                          cursor="hand2",highlightthickness=0,**kw)
         self._color,self._hover=color,hover
         self.bind("<Enter>",lambda _:self.config(bg=self._hover))

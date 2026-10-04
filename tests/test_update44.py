@@ -430,3 +430,42 @@ class ClassroomTypeTests(TempProgram):
         self.assertTrue(task["created_at"] and lecture["created_at"])
         body = classroom.courses().courseWork().create.call_args.kwargs["body"]
         self.assertEqual((body["workType"], body["state"]), ("ASSIGNMENT", "DRAFT"))     # лише чернетка, не публікація
+
+
+class InfographicAndHelpTests(unittest.TestCase):
+    def lesson(self, topic):
+        from dataclasses import replace
+        base = engine.day_lessons("2026-10-01", engine.read_json("Налаштування.json"))[0]
+        return replace(base, topic=topic)
+
+    def test_infographic_requirements_for_a_lecture(self):
+        from classroom_assistant.chatgpt_bridge import build_prompt
+        text = build_prompt(self.lesson("Особливості розвитку культури"))
+        for needle in ("ВИМОГИ ДО ІНФОГРАФІКИ", "1536×1024", "ОРИГІНАЛЬНА для цього уроку", "«Ключові дати»",
+                       "«Причини → наслідки»", "ТОЧНІСТЬ — найважливіше", "вичитай КОЖНЕ слово українською",
+                       "переймай ЛИШЕ стиль", "не вигадуй фактів"):
+            self.assertIn(needle, text, needle)
+        self.assertNotIn("«Мета роботи»", text)
+
+    def test_infographic_for_a_practical_work_follows_the_sample_structure(self):
+        from classroom_assistant.chatgpt_bridge import build_prompt
+        text = build_prompt(self.lesson("Практична робота. Аналіз творів"))
+        for needle in ("«Мета роботи»", "«Що повторити»", "«Обсяг роботи»", "«Важливо!»", "«Що прикріпити в Classroom?»",
+                       "натиснути «Здати»", "ТОЧНІСТЬ — найважливіше"):
+            self.assertIn(needle, text, needle)
+        self.assertNotIn("«Ключові дати»", text)
+
+    def test_prompt_never_asks_for_homework_in_the_word(self):
+        from classroom_assistant.chatgpt_bridge import build_prompt
+        text = build_prompt(self.lesson("Тема"))
+        self.assertIn("домашнє завдання (воно є лише в повідомленні Classroom", text)
+        self.assertNotIn("їх додасть програма", text)
+
+    def test_help_has_no_update_pages_and_explains_the_oauth_json_for_beginners(self):
+        from classroom_assistant.help_ui import PAGES
+        self.assertFalse([k for k in PAGES if k.startswith(("Оновлення", "Новинки"))])
+        google = PAGES["2. Google OAuth JSON"]
+        for needle in ("БЕЗ JSON-ФАЙЛУ GOOGLE НЕ ПУСТИТЬ ПРОГРАМУ", "класи й курси з Classroom НЕ підтягнуться",
+                       "школа з охоронцем", "ЧИ ЦЕ ПАРОЛЬ? Ні", "ОДИН раз на комп'ютер", "Download JSON", "Desktop app"):
+            self.assertIn(needle, google, needle)
+        self.assertEqual(len(PAGES), 8)

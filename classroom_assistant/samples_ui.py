@@ -210,6 +210,48 @@ def schedule_tab(book, win):
         ttk.Label(right, text=f"Попередній перегляд недоступний: {ex}", wraplength=420).pack(anchor="w")
 
 
+INFOGRAPHIC_NOTE = (
+    "Це приклад СТИЛЮ для інфографік до уроків (Шевченко тут лише як приклад теми). Збережіть файл і прикріпіть його "
+    "до чату ChatGPT разом із запитом програми: тоді ChatGPT перейме композицію карток, кольори й шрифти, але зміст, "
+    "малюнок і факти для кожного уроку будуть іншими, оригінальними й перевіреними. Запит програми вже вимагає: "
+    "інформативно, красиво, без помилок у словах і без вигаданих фактів.")
+
+
+def infographic_tab(book, win):
+    """Вкладка зі зразком інфографіки: перегляд + збереження файлу (щоб прикріпити до чату)."""
+    import io
+    from . import retro_assets
+    from .infographic_sample_data import sample_bytes
+    frame = ttk.Frame(book, padding=8)
+    book.add(frame, text="Зразок інфографіки")
+    ttk.Label(frame, text=INFOGRAPHIC_NOTE, wraplength=980, justify="left", foreground="#365777").pack(anchor="w", pady=(0, 6))
+    bar = ttk.Frame(frame)
+    bar.pack(fill="x", pady=(0, 6))
+
+    def save_sample():
+        path = filedialog.asksaveasfilename(
+            parent=win, title="Зберегти зразок інфографіки", defaultextension=".jpg",
+            initialfile="Зразок_інфографіки.jpg", filetypes=[("Зображення JPEG", "*.jpg")])
+        if not path:
+            return
+        try:
+            Path(path).write_bytes(sample_bytes())
+            messagebox.showinfo("Зразок", f"Зразок збережено:\n{path}", parent=win)
+        except Exception as ex:
+            messagebox.showerror("Зразок", str(ex), parent=win)
+    ttk.Button(bar, text="💾 Зберегти зразок (JPG)…", command=save_sample).pack(side="left")
+    try:
+        from PIL import Image
+        image = Image.open(io.BytesIO(sample_bytes()))
+        image.thumbnail((820, 548))
+        photo = retro_assets.photo(image, win)
+        label = ttk.Label(frame, image=photo)
+        label.image = photo
+        label.pack(pady=4)
+    except Exception:
+        ttk.Label(frame, text="Перегляд недоступний: збережіть файл і відкрийте його.").pack(pady=8)
+
+
 def show_samples(parent):
     win = tk.Toplevel(parent)
     win.title("Зразки документів, які розуміє програма")
@@ -252,6 +294,7 @@ def show_samples(parent):
         box.pack(fill="both", expand=True)
 
     schedule_tab(book, win)
+    infographic_tab(book, win)
     tab("Календарне планування (КТП)",
         "Таблиця «№ — Дата — Тема — Домашнє завдання». Програма підтягує теми, домашні "
         "завдання, назви розділів (рядки без номера пропускаються) та дати за класами.",

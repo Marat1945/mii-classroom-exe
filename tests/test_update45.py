@@ -22,6 +22,7 @@ class TableTests(TempProgram):
         self.app.geometry("1500x900")
         self.app.datevar.set("06.10.2026")
         self.app.update_day()
+        self.app.grid.configure(height=14)                              # усі уроки дня й порожнє місце під ними видно
         self.pump()
         self.grid = self.app.grid
         self.rows = list(self.grid.get_children())

@@ -173,7 +173,7 @@ class BulkLectureDropTests(TkCase):
             label = engine.same_day_label(lesson, material_library.parallel_matches(
                 lesson, self.app.cfg, calendar=self.lessons))
             self.assertEqual(texts[0], f"{label}, Урок {lesson.day[8:10]}.{lesson.day[5:7]} — {lesson.topic}")
-            self.assertTrue(texts[-1].startswith("Д/з:"))
+            self.assertFalse(any(x.startswith("Д/з") for x in texts))
             self.assertEqual(len(files_for(self.app.state, lesson)), 1, lesson.stream)         # картинка — у вкладеннях
         report = self.shown[-1]
         self.assertIn("Розпізнано уроків: 3", report)
