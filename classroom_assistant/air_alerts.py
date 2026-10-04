@@ -73,13 +73,40 @@ def norm(name) -> str:
     return re.sub(r"[^а-яіїєґa-z0-9']+", "", text)
 
 
+def clean_place(place) -> dict:
+    """Місце з файлу налаштувань: назва, область, а також (за наявності) район і координати."""
+    place = place if isinstance(place, dict) else {}
+    cleaned = {"name": str(place.get("name") or DEFAULT_PLACE["name"]),
+               "oblast": str(place.get("oblast") or DEFAULT_PLACE["oblast"])}
+    if place.get("raion"):
+        cleaned["raion"] = str(place["raion"])
+    try:
+        lat, lon = float(place["lat"]), float(place["lon"])
+        if 43.0 <= lat <= 53.0 and 21.0 <= lon <= 41.0:                 # лише Україна
+            cleaned["lat"], cleaned["lon"] = lat, lon
+    except (KeyError, TypeError, ValueError):
+        pass
+    return cleaned
+
+
 def place_text(place: dict) -> str:
     return (place or {}).get("name") or DEFAULT_PLACE["name"]
 
 
+def place_label(place: dict) -> str:
+    """Повний підпис місця: «Лубни (Лубенський район, Полтавська область)»."""
+    place = clean_place(place)
+    where = ", ".join(part for part in (place.get("raion"), place["oblast"])
+                      if part and part not in (place["name"], "м. " + place["name"]))
+    return f"{place['name']} ({where})" if where else place["name"]
+
+
 def place_coordinates(place: dict):
-    """Координати для сонця: за областю обраного місця (за замовчуванням — Київ)."""
-    target = norm((place or {}).get("oblast") or DEFAULT_PLACE["oblast"])
+    """Координати для сонця: точні (якщо місце знайдено в пошуку), інакше центр області (за замовчуванням — Київ)."""
+    place = clean_place(place)
+    if "lat" in place:
+        return place["lat"], place["lon"]
+    target = norm(place["oblast"])
     for oblast, coordinates in OBLASTS.items():
         if norm(oblast) == target:
             return coordinates
@@ -94,11 +121,9 @@ def load_settings(data_dir) -> dict:
             raise ValueError
     except (OSError, ValueError):
         data = {}
-    place = data.get("place") if isinstance(data.get("place"), dict) else {}
     return {"provider": data.get("provider") if data.get("provider") in PROVIDER_NAMES else UKRAINE_ALARM,
             "key": str(data.get("key") or "").strip(),
-            "place": {"name": place.get("name") or DEFAULT_PLACE["name"],
-                      "oblast": place.get("oblast") or DEFAULT_PLACE["oblast"]}}
+            "place": clean_place(data.get("place"))}
 
 
 def save_settings(data_dir, settings: dict) -> None:
@@ -164,6 +189,11 @@ def find_region(index, place) -> str | None:
         best = best or rid
     if best:
         return best
+    raion = norm(place.get("raion"))
+    if raion:                                                    # населений пункт → його район (в межах області)
+        for rid, node in index.items():
+            if norm(node["name"]) == raion and norm(index.get(node["owner"], {}).get("name")) == oblast:
+                return rid
     for rid, node in index.items():
         if node["owner"] == rid and norm(node["name"]) == oblast:
             return rid
@@ -199,7 +229,7 @@ def evaluate_ukrainealarm(active, index, region_id) -> Status:
 
 # ---------- alerts.in.ua ----------
 def evaluate_alerts_in_ua(alerts, place) -> Status:
-    name, oblast = norm(place.get("name")), norm(place.get("oblast"))
+    name, oblast, raion = norm(place.get("name")), norm(place.get("oblast")), norm(place.get("raion"))
     mine, nearby_air = [], False
     for alert in alerts or []:
         if not isinstance(alert, dict) or alert.get("finished_at"):
@@ -208,7 +238,7 @@ def evaluate_alerts_in_ua(alerts, place) -> Status:
         title = norm(alert.get("location_title"))
         alert_oblast = norm(alert.get("location_oblast")) or (title if alert.get("location_type") == "oblast" else "")
         whole_oblast = alert.get("location_type") == "oblast" and alert_oblast == oblast
-        if whole_oblast or (name and title == name):
+        if whole_oblast or (name and title == name) or (raion and title == raion):
             mine.append(kind)
         elif alert_oblast == oblast and kind == "air_raid":
             nearby_air = True

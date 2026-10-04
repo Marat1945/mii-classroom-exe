@@ -1,4 +1,4 @@
-"""Панель повітряної тривоги (малюнок) та вікно вибору місця й джерела даних."""
+"""Панель повітряної тривоги (малюнок на головному екрані) та вікно вибору місця й джерела даних."""
 from __future__ import annotations
 
 import threading
@@ -9,11 +9,12 @@ from tkinter import font as tkfont
 from tkinter import ttk
 
 from . import air_alerts as aa
+from . import geocode
 from . import retro_assets as assets
 from .toast import show_toast
-from .window_ui import fit_work_window
+from .window_ui import fit_work_window, remember_window, reuse_window
 
-WIDTH, HEIGHT, PLATE_HEIGHT = 250, 268, 208
+WIDTH, HEIGHT, PLATE_HEIGHT = 250, 290, 228
 LEVEL_COLORS = {aa.RED: (255, 111, 94), aa.YELLOW: (246, 196, 49)}
 CAPTION = "Натисніть на малюнок: можна вибрати будь-який населений пункт України. Зараз обрано: {place}"
 SUBTITLES = {
@@ -38,8 +39,6 @@ class AlertPanel(tk.Canvas):
         self.stamp = ""
         self._images = []
         self._icons = {}
-        self._preview_job = None
-        self._real = None
         self.title_font = tkfont.Font(family="Segoe UI", size=14, weight="bold")
         self.sub_font = tkfont.Font(family="Segoe UI", size=10)
         self.small_font = tkfont.Font(family="Segoe UI", size=8)
@@ -47,30 +46,10 @@ class AlertPanel(tk.Canvas):
         self.draw()
 
     def show(self, status: aa.Status, place: str):
-        """Показати реальний стан (під час демонстрації він запам'ятовується й повертається після неї)."""
-        self._real = (status, place)
-        if self._preview_job:
-            return
-        self._apply(status, place)
-
-    def _apply(self, status: aa.Status, place: str):
         self.level, self.place, self.detail = status.level, place, status.detail
         self.stamp = time.strftime("Станом на %H:%M", time.localtime(status.checked_at)) \
             if status.level == aa.NONE and status.checked_at else ""
         self.draw()
-
-    def preview(self, level: str, seconds: float = 8.0):
-        """Показати, як виглядає стан (для вікна налаштувань), і повернути реальний через кілька секунд."""
-        if self._preview_job:
-            self.after_cancel(self._preview_job)
-        sample = aa.Status(level, TITLES[level], SUBTITLES[level], time.time())
-        self._apply(sample, self.place)
-        self._preview_job = self.after(int(seconds * 1000), self._end_preview)
-
-    def _end_preview(self):
-        self._preview_job = None
-        if self._real:
-            self._apply(*self._real)
 
     def _icon(self, level):
         if level not in self._icons and assets.available():
@@ -90,17 +69,17 @@ class AlertPanel(tk.Canvas):
         if self.level in LEVEL_COLORS:
             icon = self._icon(self.level)
             if icon:
-                self.create_image(WIDTH // 2, 62, image=icon)
-            self.create_text(WIDTH // 2, 134, text=TITLES[self.level], font=self.title_font, fill=cream,
+                self.create_image(WIDTH // 2, 70, image=icon)
+            self.create_text(WIDTH // 2, 148, text=TITLES[self.level], font=self.title_font, fill=cream,
                              width=WIDTH - 30, justify="center")
-            self.create_text(WIDTH // 2, 176, text=self.detail or SUBTITLES[self.level], font=self.sub_font,
+            self.create_text(WIDTH // 2, 194, text=self.detail or SUBTITLES[self.level], font=self.sub_font,
                              fill="#C9C2A8", width=WIDTH - 36, justify="center")
         else:
-            self.create_text(WIDTH // 2, 86, text=TITLES[self.level], font=self.title_font,
+            self.create_text(WIDTH // 2, 96, text=TITLES[self.level], font=self.title_font,
                              fill=cream if self.level == aa.NONE else "#C9C2A8", width=WIDTH - 30, justify="center")
-            self.create_text(WIDTH // 2, 138, font=self.sub_font, fill="#C9C2A8", width=WIDTH - 36, justify="center",
+            self.create_text(WIDTH // 2, 152, font=self.sub_font, fill="#C9C2A8", width=WIDTH - 36, justify="center",
                              text=self.stamp or self.detail or SUBTITLES[self.level])
-        self.create_text(WIDTH // 2, PLATE_HEIGHT + 28, text=CAPTION.format(place=self.place), font=self.small_font,
+        self.create_text(WIDTH // 2, PLATE_HEIGHT + 32, text=CAPTION.format(place=self.place), font=self.small_font,
                          fill="#5E5039", width=WIDTH - 18, justify="center")
 
     def text_items(self) -> list:
@@ -108,10 +87,14 @@ class AlertPanel(tk.Canvas):
 
 
 def show_alert_setup(app):
-    """Вікно: місце (область/район/громада), джерело (ключ), пояснення кольорів, демонстрація вигляду."""
+    """Вікно: місце (будь-який населений пункт), джерело даних і ключ. Відкривається ОДИН раз: повторний клац лише виносить його."""
+    existing = reuse_window(app, "alert_setup")
+    if existing:
+        return existing
     from .engine import DATA
     settings = aa.load_settings(DATA)
     win = tk.Toplevel(app)
+    remember_window(app, "alert_setup", win)
     win.title("Повітряна тривога: місце й джерело даних")
     fit_work_window(win, "normal")
     win.transient(app)
@@ -119,45 +102,93 @@ def show_alert_setup(app):
     outer = ttk.Frame(win, padding=14)
     outer.pack(fill="both", expand=True)
     ttk.Label(outer, wraplength=820, justify="left",
-              text="Малюнок показує, чи є повітряна тривога в місці, де ви працюєте. Дані беруться з офіційних джерел, "
-                   "але доступ до них дають лише за ключем: його видають за заявкою на сайті джерела (умови видачі "
-                   "дивіться там). Програма нічого не публікує й не замінює сирену та сповіщення «Повітряна тривога».").pack(anchor="w")
+              text="Малюнок на головному екрані показує, чи є повітряна тривога в місці, де ви працюєте. Дані беруться з "
+                   "офіційних джерел, але доступ до них дають лише за ключем: його видають за заявкою на сайті джерела "
+                   "(умови видачі дивіться там). Програма нічого не публікує й не замінює сирену та сповіщення "
+                   "«Повітряна тривога».").pack(anchor="w")
 
-    place_box = ttk.LabelFrame(outer, text=" 1. Де ви працюєте ", padding=10)
-    place_box.pack(fill="x", pady=(10, 6))
-    chosen = {"place": dict(settings["place"])}
-    chosen_var = tk.StringVar(master=win, value="Обрано: " + aa.place_text(settings["place"]))
+    place_box = ttk.LabelFrame(outer, text=" 1. Де ви працюєте: оберіть будь-який населений пункт України ", padding=10)
+    place_box.pack(fill="both", expand=True, pady=(10, 6))
+    chosen = {"place": aa.clean_place(settings["place"])}
+    chosen_var = tk.StringVar(master=win, value="Обрано: " + aa.place_label(chosen["place"]))
     win.chosen_var = chosen_var
     query = tk.StringVar(master=win)
     win.query = query
+    status_var = tk.StringVar(master=win, value="Введіть назву міста, селища чи села й натисніть «Знайти».")
+    win.search_status = status_var
     row = ttk.Frame(place_box)
     row.pack(fill="x")
-    ttk.Label(row, text="Пошук:").pack(side="left")
+    ttk.Label(row, text="Назва:").pack(side="left")
     entry = ttk.Entry(row, textvariable=query)
     entry.pack(side="left", fill="x", expand=True, padx=6)
-    box = tk.Listbox(place_box, height=6, exportselection=False)
-    box.pack(fill="x", pady=(6, 4))
+    find_button = ttk.Button(row, text="Знайти")
+    find_button.pack(side="left")
+    ttk.Label(place_box, textvariable=status_var, foreground="#5E5039").pack(anchor="w", pady=(4, 0))
+    box = tk.Listbox(place_box, height=7, exportselection=False)
+    box.pack(fill="both", expand=True, pady=(4, 4))
     win.places_box = box
     ttk.Label(place_box, textvariable=chosen_var, font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    ttk.Label(place_box, text="Пошук населених пунктів: © учасники OpenStreetMap", foreground="#5E5039",
+              font=("Segoe UI", 8)).pack(anchor="w")
     options = []
 
-    def refill(*_):
+    def fill(items):
         nonlocal options
-        index = _cached_index(DATA)
-        options = aa.search_places(query.get(), index)
+        options = list(items)
         box.delete(0, "end")
         for label, _place in options:
             box.insert("end", label)
+
+    def local_matches():
+        return aa.search_places(query.get(), _cached_index(DATA))
+
+    def refill(*_):
+        fill(local_matches())
     win.refill = refill
 
     def pick(_event=None):
         selection = box.curselection()
         if selection:
-            chosen["place"] = dict(options[selection[0]][1])
-            chosen_var.set("Обрано: " + aa.place_text(chosen["place"]))
+            chosen["place"] = aa.clean_place(options[selection[0]][1])
+            chosen_var.set("Обрано: " + aa.place_label(chosen["place"]))
     box.bind("<<ListboxSelect>>", pick)
     query.trace_add("write", refill)
     refill()
+
+    def search_online(_event=None):
+        """Пошук будь-якого населеного пункту в інтернеті (у фоні); результат забирає головний потік."""
+        text = query.get().strip()
+        holder = {}
+        status_var.set("Шукаю…")
+
+        def work():
+            try:
+                holder["items"] = geocode.search(text)
+            except geocode.GeocodeError as error:
+                holder["error"] = str(error)
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            try:
+                if not win.winfo_exists():
+                    return
+                if not holder:
+                    win.after(150, poll)
+                    return
+                if "error" in holder:
+                    status_var.set(holder["error"].capitalize() + ". Нижче — області зі списку програми.")
+                    return
+                found = [(item["label"], {k: item[k] for k in ("name", "oblast", "raion", "lat", "lon")})
+                         for item in holder["items"]]
+                fill(found + [m for m in local_matches() if m[0] not in {f[0] for f in found}])
+                status_var.set(f"Знайдено: {len(found)}. Оберіть зі списку." if found
+                               else "Такого населеного пункту не знайдено: перевірте написання.")
+            except tk.TclError:
+                return
+        win.after(150, poll)
+    find_button.configure(command=search_online)
+    entry.bind("<Return>", search_online)
+    win.search_online = search_online
 
     source_box = ttk.LabelFrame(outer, text=" 2. Джерело даних ", padding=10)
     source_box.pack(fill="x", pady=(0, 6))
@@ -176,22 +207,6 @@ def show_alert_setup(app):
     result = tk.StringVar(master=win, value="")
     win.result = result
     ttk.Label(source_box, textvariable=result, wraplength=780, justify="left", foreground="#5E5039").pack(anchor="w", pady=(6, 0))
-
-    legend = ttk.LabelFrame(outer, text=" 3. Що означають кольори ", padding=10)
-    legend.pack(fill="x", pady=(0, 6))
-    ttk.Label(legend, wraplength=800, justify="left", text=(
-        "ЧЕРВОНИЙ (бомбочка в червоному колі) — повітряна тривога у вашому місці або в області чи районі, що його включає.\n"
-        "ЖОВТИЙ (бомбочка в жовтому колі) — у вашому місці інша загроза, або тривога в іншій частині вашої області.\n"
-        "ТРИВОГИ НЕМАЄ — лише коли дані свіжі (не старші за 3 хвилини). НЕМАЄ ДАНИХ — немає ключа, зв'язку або дані "
-        "застаріли; тоді програма НІКОЛИ не пише «тривоги немає».\n"
-        "Державні жовтий і червоний рівні загрози запроваджуються, але відкритих даних про рівень поки немає: "
-        "тому це правило програми.")).pack(anchor="w")
-
-    demo = ttk.Frame(outer)
-    demo.pack(fill="x", pady=(0, 6))
-    ttk.Label(demo, text="Показати вигляд на 8 с:").pack(side="left")
-    for level, label in ((aa.RED, "Червоний"), (aa.YELLOW, "Жовтий"), (aa.NONE, "Тривоги немає"), (aa.UNKNOWN, "Немає даних")):
-        ttk.Button(demo, text=label, command=lambda lv=level: app.alert_panel.preview(lv)).pack(side="left", padx=4)
 
     def collect():
         return {"provider": provider.get(), "key": key.get().strip(), "place": chosen["place"]}

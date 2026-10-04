@@ -66,3 +66,27 @@ def fit_work_window(window,kind="normal",minimum=None):
             pass
     window.after_idle(apply)
     return window
+
+
+def reuse_window(owner, key):
+    """Вікно з таким ключем уже відкрите? Тоді виносимо його наперед і повертаємо (нового не створюємо)."""
+    window = getattr(owner, "_single_windows", {}).get(key)
+    if window is None:
+        return None
+    try:
+        if not window.winfo_exists():
+            return None
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+        return window
+    except tk.TclError:
+        return None
+
+
+def remember_window(owner, key, window):
+    """Запам'ятати відкрите вікно, щоб повторний клац не відкривав друге таке саме."""
+    if not hasattr(owner, "_single_windows"):
+        owner._single_windows = {}
+    owner._single_windows[key] = window
+    return window

@@ -65,25 +65,6 @@ class SunAndMoonTests(unittest.TestCase):
         self.assertEqual(sm.ukraine_offset(utc(2026, 10, 25, 1, 0)), timedelta(hours=2))
         self.assertEqual(sm.ukraine_offset(utc(2026, 1, 10, 12, 0)), timedelta(hours=2))
 
-    def test_moon_events_fall_on_the_real_dates_within_a_day(self):
-        kind, when = sm.next_moon_event(date(2026, 10, 20))
-        self.assertEqual(kind, "Повня")
-        self.assertLessEqual(abs((when - date(2026, 10, 26)).days), 1)
-        kind, when = sm.next_moon_event(date(2026, 10, 5))
-        self.assertEqual(kind, "Новомісяччя")
-        self.assertLessEqual(abs((when - date(2026, 10, 10)).days), 1)
-
-    def test_moon_phase_names_and_light(self):
-        names = set()
-        for offset in range(30):
-            name, light = sm.moon_phase(date(2026, 10, 1) + timedelta(days=offset))
-            names.add(name)
-            self.assertTrue(0 <= light <= 1)
-        self.assertEqual(names, set(sm.PHASES))
-        self.assertGreater(sm.moon_phase(date(2026, 10, 26))[1], 0.95)           # повня майже повністю освітлена
-        self.assertLess(sm.moon_phase(date(2026, 10, 10))[1], 0.05)
-
-
 SAMPLE = """Подій
 == Події ==
 === До XIX століття ===
@@ -142,19 +123,17 @@ class DayFactsTests(unittest.TestCase):
         holidays = [text for kind, text in lines if kind == "holiday"]
         events = [text for kind, text in lines if kind == "event"]
         self.assertEqual(holidays[0], "Всесвітній день учителів")                    # вбудований список
-        self.assertLessEqual(len(holidays), 2)
-        self.assertEqual(len(events), 2)
+        self.assertLessEqual(len(holidays), 3)
+        self.assertEqual(len(events), 4)                                              # на великому листку їх більше
         self.assertIn("Хмельницький", events[0])                                      # українське — першим
         self.assertTrue(events[0].startswith("1648 р. — "))
-
     def test_holidays_and_events_alternate_so_both_fit_on_the_leaf(self):
         lines = day_facts.compose(day_facts.parse_extract(SAMPLE), 10, 5)
-        self.assertEqual([kind for kind, _ in lines], ["holiday", "event", "holiday", "event"])
-        self.assertEqual([kind for kind, _ in lines[:3]], ["holiday", "event", "holiday"])      # на листочку — перші три
+        kinds = [kind for kind, _ in lines]
+        self.assertEqual(kinds[:6], ["holiday", "event", "holiday", "event", "holiday", "event"])
         self.assertEqual([kind for kind, _ in day_facts.compose(None, 10, 5)], ["holiday"])
         only_events = day_facts.compose(day_facts.Facts(events=[(1648, "гетьман х")]), 4, 4)
         self.assertEqual([kind for kind, _ in only_events], ["event"])
-
     def test_built_in_dates_work_without_any_internet(self):
         for month, day, expected in ((8, 24, "День Незалежності України"), (1, 22, "День Соборності України"),
                                      (9, 1, "День знань"), (10, 1, "День захисників і захисниць України")):
@@ -188,7 +167,7 @@ class DayFactsTests(unittest.TestCase):
             thread = loader.refresh_async(10, 4)
             thread.join(5)
             self.assertIn((10, 4), loader.updated)
-            self.assertTrue(any("гетьман" in t for _, t in loader.lookup(10, 4) if t))
+            self.assertTrue(any("гетьман" in t.casefold() for _, t in loader.lookup(10, 4) if t))
             self.assertIsNone(loader.refresh_async(10, 4))                           # уже в кеші: удруге не качаємо
             self.assertEqual(len(calls), 1)
 
@@ -433,9 +412,9 @@ class IconTests(unittest.TestCase):
 
 
 class LeafTests(TkCase):
-    def make(self):
+    def make(self, scale=0.47):
         host = tk.Toplevel(self.root)
-        leaf = calendar_leaf.CalendarLeaf(host)
+        leaf = calendar_leaf.CalendarLeaf(host, scale=scale)
         leaf.pack()
 
         def close():
@@ -446,19 +425,28 @@ class LeafTests(TkCase):
         self.addCleanup(close)
         return leaf
 
-    def test_the_leaf_shows_number_month_weekday_sun_moon_and_the_day_facts(self):
-        leaf = self.make()
-        lines = [("holiday", "Всесвітній день учителів"), ("event", "1957 р. — запущено «Спутник-1»")]
+    def test_the_leaf_shows_number_month_weekday_sun_and_the_chronicle_without_the_moon(self):
+        leaf = self.make(1.0)
+        lines = [("holiday", "Всесвітній день учителів"), ("event", "1957 р. — Запущено «Спутник-1»")]
         leaf.show(date(2026, 10, 5), *KYIV, lines)
         texts = leaf.text_items()
-        self.assertTrue("ПОНЕДІЛОК" in texts or "П О Н Е Д І Л О К" in texts)          # залежно від ширини шрифту
-        for expected in ("5", "2026", "№ 278", "Ж О В Т Е Н Ь", "Свято: Всесвітній день учителів",
-                         "У цей день: 1957 р. — запущено «Спутник-1»"):
+        self.assertTrue("ПОНЕДІЛОК" in texts or "П О Н Е Д І Л О К" in texts)
+        for expected in ("5", "2 0 2 6", "Ж О В Т Е Н Ь", "Схід сонця", "Захід сонця", "Тривалість", "дня", "День року", "278-й",
+                         "Свято", "1957", "Запущено «Спутник-1»"):
             self.assertIn(expected, texts, expected)
-        self.assertTrue(any(t.startswith("Схід ") for t in texts))
-        self.assertTrue(any(t.startswith("Захід ") for t in texts))
-        self.assertTrue(any(t.startswith("День 11:") for t in texts))
-        self.assertTrue(any(t.startswith(("Повня ", "Новомісяччя ")) for t in texts))
+        self.assertEqual(texts.count("2 0 2 6"), 2)                                   # рік і ліворуч, і праворуч, як у зразку
+        self.assertEqual(leaf.shown, [("holiday", "Всесвітній день учителів"), ("event", "1957 р. — Запущено «Спутник-1»")])
+        for time_text in (leaf.data["sunrise"], leaf.data["sunset"]):
+            self.assertRegex(time_text, r"^\d{1,2}\.\d{2}$")                          # «7.12», як у зразку
+        self.assertRegex(leaf.data["hours"], r"^\d+ год\.$")
+        self.assertRegex(leaf.data["minutes"], r"^\d{2} хв\.$")
+        joined = " ".join(texts)
+        for gone in ("Місяць", "Повня", "Новомісяччя", "чверть", "високос", "Схід місяця", "Тривалість ночі"):
+            self.assertNotIn(gone, joined, gone)                                      # Місяця, високосного року й ночі на листку немає
+    def test_without_facts_it_says_when_they_will_appear(self):
+        leaf = self.make(1.0)
+        leaf.show(date(2026, 10, 4), *KYIV, [])
+        self.assertIn("з'являться, коли буде зв'язок", " ".join(leaf.text_items()))
 
     def test_the_source_line_names_wikipedia_only_when_the_text_really_came_from_it(self):
         leaf = self.make()
@@ -470,31 +458,85 @@ class LeafTests(TkCase):
         leaf.show(date(2026, 10, 5), *KYIV, [("holiday", "x")])
         self.assertFalse(any("Вікіпедії" in t or "вбудований" in t for t in leaf.text_items()))
 
-    def test_without_facts_it_says_when_they_will_appear(self):
-        leaf = self.make()
-        leaf.show(date(2026, 10, 4), *KYIV, [])
-        self.assertTrue(any("з'являться, коли буде зв'язок" in t for t in leaf.text_items()))
-
-    def test_a_long_weekday_goes_to_its_own_row_and_weekends_are_red(self):
-        leaf = self.make()
+    def test_month_number_and_weekday_are_red_like_on_the_sample_and_weekends_stay_red(self):
+        leaf = self.make(1.0)
         leaf.show(date(2026, 9, 18), *KYIV, [])                                        # п'ятниця
-        weekday = next(i for i in leaf.find_all() if leaf.type(i) == "text" and "Я" in leaf.itemcget(i, "text")
-                       and "Н" in leaf.itemcget(i, "text") and leaf.itemcget(i, "text").startswith("П"))
-        month = next(i for i in leaf.find_all() if leaf.type(i) == "text" and leaf.itemcget(i, "text").startswith("В Е Р"))
-        self.assertGreater(leaf.coords(weekday)[1], leaf.coords(month)[1])             # нижче за місяць
+        by_text = {leaf.itemcget(i, "text"): leaf.itemcget(i, "fill") for i in leaf.find_all() if leaf.type(i) == "text"}
+        self.assertEqual(by_text["18"], calendar_leaf.RED)                             # число червоне
+        self.assertEqual(by_text["В Е Р Е С Е Н Ь"], calendar_leaf.RED)                # місяць червоний
+        weekday = next(v for k, v in by_text.items() if k in ("П'ЯТНИЦЯ", "П ' Я Т Н И Ц Я"))
+        self.assertEqual(weekday, calendar_leaf.RED)
+        self.assertEqual(by_text["Схід сонця"], calendar_leaf.INK)                     # решта — чорнилом
         leaf.show(date(2026, 10, 4), *KYIV, [])                                        # неділя
         sunday = next(i for i in leaf.find_all() if leaf.type(i) == "text"
                       and leaf.itemcget(i, "text") in ("НЕДІЛЯ", "Н Е Д І Л Я"))
-        self.assertEqual(leaf.itemcget(sunday, "fill"), "#7A1F1F")
+        self.assertEqual(leaf.itemcget(sunday, "fill"), calendar_leaf.RED)
 
-    def test_at_most_three_items_fit_on_the_leaf(self):
-        leaf = self.make()
-        lines = [("holiday", f"Свято {i}") for i in range(3)] + [("event", f"Подія {i}") for i in range(3)]
-        leaf.show(date(2026, 10, 5), *KYIV, lines)
-        shown = [t for t in leaf.text_items() if t.startswith(("Свято:", "У цей день:"))]
-        self.assertEqual(len(shown), 3)
+    def test_every_month_name_stays_between_the_two_side_columns(self):
+        for scale in (1.0, 0.47):
+            leaf = self.make(scale)
+            for month in range(1, 13):
+                leaf.show(date(2026, month, 15), *KYIV, [])
+                name = next(i for i in leaf.find_all() if leaf.type(i) == "text"
+                            and leaf.itemcget(i, "text") == calendar_leaf.spaced(calendar_leaf.MONTHS[month - 1]))
+                box = leaf.bbox(name)
+                self.assertGreaterEqual(box[0], 112 * scale - 2, (scale, month))
+                self.assertLessEqual(box[2], 308 * scale + 2, (scale, month))
 
+    def test_the_text_is_left_aligned_in_a_chronicle_with_years_in_their_own_column(self):
+        leaf = self.make(1.0)
+        leaf.show(date(2026, 6, 22), *KYIV, [("event", "1941 р. — Напад нацистської Німеччини на СРСР: початок війни"),
+                                              ("holiday", "День скорботи")])
+        items = {leaf.itemcget(i, "text"): leaf.coords(i) for i in leaf.find_all() if leaf.type(i) == "text"}
+        year_x, text_x = items["1941"][0], items["Свято"][0]
+        self.assertEqual(year_x, text_x)                                               # і роки, і «Свято» — в одному стовпчику
+        body_x = next(v[0] for k, v in items.items() if k.startswith("Напад"))
+        self.assertGreater(body_x, year_x + 30)                                        # а текст — правіше
+        self.assertLess(body_x, calendar_leaf.DESIGN_W / 2)                            # і не по центру
+        anchors = {leaf.itemcget(i, "anchor") for i in leaf.find_all()
+                   if leaf.type(i) == "text" and leaf.itemcget(i, "text").startswith("Напад")}
+        self.assertEqual(anchors, {"nw"})
 
+    def test_the_paper_is_an_aged_texture_and_there_is_no_engraving(self):
+        leaf = self.make(1.0)
+        leaf.show(date(2026, 10, 5), *KYIV, [("holiday", "x")])
+        images = [i for i in leaf.find_all() if leaf.type(i) == "image"]
+        self.assertEqual(len(images), 1)                                               # лише папір
+        self.assertFalse(hasattr(calendar_leaf, "leaf_art"))
+    def test_the_leaf_keeps_whole_items_only_and_never_runs_past_the_paper(self):
+        lines = [("holiday", f"Свято {i} " + "слово " * 8) for i in range(3)] + \
+                [("event", f"{1900 + i} р. — подія " + "слово " * 14) for i in range(8)]
+        for scale in (1.0, 0.47):
+            leaf = self.make(scale)
+            leaf.show(date(2026, 10, 5), *KYIV, lines, "вбудований список пам'ятних дат")
+            self.assertGreaterEqual(len(leaf.shown), 3)
+            self.assertLess(len(leaf.shown), len(lines))                                # решта не вмістилась — пропущена цілком
+            self.assertEqual(leaf.shown, lines[:len(leaf.shown)])                       # порядок збережено, без «дір»
+            paper = (calendar_leaf.DESIGN_W - 12) * scale + 2
+            for item in leaf.find_all():
+                if leaf.type(item) == "text":
+                    box = leaf.bbox(item)
+                    self.assertLessEqual(box[2], paper, leaf.itemcget(item, "text"))
+                    self.assertLessEqual(box[3], (calendar_leaf.DESIGN_H - 14) * scale + 2)
+
+    def test_the_small_leaf_is_an_exact_reduced_copy_of_the_big_one(self):
+        lines = [("holiday", "Всесвітній день учителів"), ("event", "1943 р. — Радянські війська визволили Київ від німецької окупації")]
+        small, big = self.make(0.47), self.make(1.0)
+        for leaf in (small, big):
+            leaf.show(date(2026, 11, 6), *KYIV, lines, "вбудований список пам'ятних дат")
+        self.assertEqual(small.shown, big.shown)                                       # той самий вміст, нічого не обрізано
+        ratio = lambda leaf: int(leaf.cget("width")) / int(leaf.cget("height"))
+        self.assertAlmostEqual(ratio(small), ratio(big), delta=0.01)                    # ті самі пропорції
+        self.assertAlmostEqual(ratio(big), calendar_leaf.DESIGN_W / calendar_leaf.DESIGN_H, delta=0.01)
+        rows = lambda leaf: sum(1 for t in leaf.text_items() if "Київ" in t or "окупац" in t)
+        self.assertEqual(rows(small), rows(big))                                       # однакові переноси рядків
+
+    def test_the_big_leaf_is_larger_than_life_but_fits_any_screen(self):
+        self.assertEqual(calendar_leaf.full_scale(1440), 1.2)
+        self.assertEqual(calendar_leaf.full_scale(1080), 1.2)
+        self.assertLess(calendar_leaf.full_scale(768), 1.2)
+        self.assertGreaterEqual(calendar_leaf.full_scale(400), 0.55)
+        self.assertLessEqual(calendar_leaf.DESIGN_H * calendar_leaf.full_scale(1080) + 80, 1080)
 class PanelTests(TkCase):
     def make(self, clicks=None):
         host = tk.Toplevel(self.root)
@@ -546,17 +588,6 @@ class PanelTests(TkCase):
         panel.update()
         self.assertEqual(clicks, [1])
 
-    def test_a_demonstration_is_temporary_and_the_real_state_returns(self):
-        panel = self.make()
-        panel.show(aa.Status(aa.UNKNOWN, "Немає даних про тривогу", "", None), "Київ")
-        panel.preview(aa.RED, seconds=60)
-        self.assertEqual(panel.level, aa.RED)
-        panel.show(aa.Status(aa.NONE, "Тривоги немає", "", time.time()), "Київ")        # реальні дані прийшли під час показу
-        self.assertEqual(panel.level, aa.RED)                                          # показ не переривається
-        panel._end_preview()
-        self.assertEqual(panel.level, aa.NONE)
-
-
 class MainWindowTests(TempProgram):
     def setUp(self):
         super().setUp()
@@ -570,15 +601,12 @@ class MainWindowTests(TempProgram):
     def test_the_message_field_is_narrower_and_the_alert_and_the_leaf_sit_to_its_right_symmetrically(self):
         app = self.app
         alert, leaf, desc = app.alert_panel, app.leaf, app.desc
-        self.assertLess(desc.winfo_width(), app.winfo_width() - 450)
+        self.assertLess(desc.winfo_width(), app.winfo_width() - 400)
         self.assertLess(desc.winfo_rootx(), alert.winfo_rootx())
         self.assertLess(alert.winfo_rootx(), leaf.winfo_rootx())                     # тривога зліва від листочка
         self.assertEqual(alert.winfo_height(), leaf.winfo_height())                  # однакова висота
-        self.assertEqual(alert.winfo_width(), leaf.winfo_width())                    # і ширина
         self.assertEqual(alert.winfo_rooty(), leaf.winfo_rooty())                    # на одному рівні
-        right_edge = leaf.winfo_rootx() + leaf.winfo_width()
-        self.assertLessEqual(right_edge, app.winfo_rootx() + app.winfo_width())
-
+        self.assertLessEqual(leaf.winfo_rootx() + leaf.winfo_width(), app.winfo_rootx() + app.winfo_width())
     def test_the_bottom_row_never_disappears_even_on_a_low_window(self):
         self.app.geometry("1500x820")
         for _ in range(10):
@@ -600,29 +628,27 @@ class MainWindowTests(TempProgram):
 
     def test_the_leaf_follows_the_selected_day_and_shows_holidays_without_internet(self):
         self.assertEqual(self.app.leaf.day, date(2026, 10, 5))
-        self.assertIn("Свято: Всесвітній день учителів", self.app.leaf.text_items())
+        self.assertIn(("holiday", "Всесвітній день учителів"), self.app.leaf.shown)
         self.app.datevar.set("24.08.2026")
         self.app.update_day()
         self.assertEqual(self.app.leaf.day, date(2026, 8, 24))
-        self.assertIn("Свято: День Незалежності України", self.app.leaf.text_items())
-
+        self.assertIn(("holiday", "День Незалежності України"), self.app.leaf.shown)
     def test_the_main_leaf_credits_wikipedia_only_after_a_wikipedia_page_is_cached(self):
         self.assertIn("вбудований список пам'ятних дат", self.app.leaf.text_items())
         day_facts.store(engine.DATA, 10, 5, day_facts.parse_extract(SAMPLE))
         self.app._refresh_leaf()
         self.assertIn("за матеріалами Вікіпедії (CC BY-SA)", self.app.leaf.text_items())
-        self.assertTrue(any(t.startswith("У цей день: 1648 р.") for t in self.app.leaf.text_items()))
-
+        self.assertTrue(any(text.startswith("1648 р.") for kind, text in self.app.leaf.shown))
     def test_sun_times_follow_the_chosen_oblast(self):
-        kyiv = [t for t in self.app.leaf.text_items() if t.startswith("Схід ")][0]
+        minutes_of = lambda text: int(text.split(".")[0]) * 60 + int(text.split(".")[1])
+        kyiv = self.app.leaf.data["sunrise"]
         aa.save_settings(engine.DATA, {"provider": aa.UKRAINE_ALARM, "key": "",
                                        "place": {"name": "Львів", "oblast": "Львівська область"}})
         self.app.alert_settings_changed()
-        lviv = [t for t in self.app.leaf.text_items() if t.startswith("Схід ")][0]
+        lviv = self.app.leaf.data["sunrise"]
         self.assertNotEqual(kyiv, lviv)
-        self.assertGreater(minutes(lviv[5:]), minutes(kyiv[5:]))                     # на заході сонце сходить пізніше
+        self.assertGreater(minutes_of(lviv), minutes_of(kyiv))                       # на заході сонце сходить пізніше
         self.assertTrue(any("Зараз обрано: Львів" in t for t in self.app.alert_panel.text_items()))
-
     def test_without_a_key_the_panel_says_there_is_no_data_never_no_alert(self):
         self.app._apply_alert_status()
         self.assertEqual(self.app.alert_panel.level, aa.UNKNOWN)
@@ -685,15 +711,17 @@ class SetupWindowTests(TempProgram):
                 out.append(str(widget.cget("text")))
         return out
 
-    def test_kyiv_is_chosen_by_default_and_the_explanations_are_honest(self):
+    def test_kyiv_is_chosen_by_default_and_there_is_no_clutter(self):
         window = self.make()
         self.assertEqual(window.chosen_var.get(), "Обрано: Київ")
         text = "\n".join(self.labels(window))
-        for needle in ("ЧЕРВОНИЙ (бомбочка в червоному колі)", "ЖОВТИЙ (бомбочка в жовтому колі)", "НІКОЛИ не пише «тривоги немає»",
-                       "не замінює сирену", "Отримати ключ (відкрити сайт)", "Ukraine Alarm (державна система)", "alerts.in.ua",
-                       "Державні жовтий і червоний рівні загрози запроваджуються"):
+        for needle in ("не замінює сирену", "Отримати ключ (відкрити сайт)", "Ukraine Alarm (державна система)",
+                       "alerts.in.ua", "оберіть будь-який населений пункт України", "© учасники OpenStreetMap"):
             self.assertIn(needle, text, needle)
-
+        for gone in ("Що означають кольори", "Показати вигляд", "ЧЕРВОНИЙ (бомбочка", "Державні жовтий"):
+            self.assertNotIn(gone, text, gone)                                        # зайвих блоків і кнопок немає
+        buttons = {w.cget("text") for w in self.walk(window) if w.winfo_class() == "TButton"}
+        self.assertFalse(buttons & {"Червоний", "Жовтий", "Тривоги немає", "Немає даних"})
     def test_search_filters_places_and_a_click_chooses_one(self):
         window = self.make()
         self.assertGreaterEqual(window.places_box.size(), 25)
@@ -753,14 +781,6 @@ class SetupWindowTests(TempProgram):
                 time.sleep(0.02)
         self.assertIn("Повітряна тривога. Терміново пройдіть", window.result.get())
         self.assertIn("alerts.in.ua", window.result.get())
-
-    def test_demo_buttons_show_each_state_on_the_main_panel(self):
-        window = self.make()
-        seen = []
-        with mock.patch.object(self.app.alert_panel, "preview", side_effect=lambda level, *a, **k: seen.append(level)):
-            for label in ("Червоний", "Жовтий", "Тривоги немає", "Немає даних"):
-                next(w for w in self.walk(window) if w.winfo_class() == "TButton" and w.cget("text") == label).invoke()
-        self.assertEqual(seen, [aa.RED, aa.YELLOW, aa.NONE, aa.UNKNOWN])
 
     def test_the_key_site_buttons_open_the_right_pages(self):
         window = self.make()

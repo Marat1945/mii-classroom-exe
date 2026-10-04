@@ -27,7 +27,8 @@ from .datepicker import pick_date
 from . import air_alerts, browser_downloads, data_tools, day_facts, file_match, lecture_inbox, wheel
 from . import app_icon
 from .alert_ui import AlertPanel, show_alert_setup
-from .calendar_leaf import CalendarLeaf
+from .calendar_leaf import DESIGN_H, CalendarLeaf, show_leaf_window
+from .alert_ui import HEIGHT as SIDE_HEIGHT
 from .toast import show_toast
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -160,7 +161,7 @@ class MainApp(WindowBase):
         self.grid_columns=cols
         table_frame=ttk.Frame(outer);table_frame.pack(fill="both",expand=True)
         self.grid=ttk.Treeview(table_frame,columns=cols,show="headings",
-                                selectmode="extended",height=5)
+                                selectmode="extended",height=3)          # мінімум 3 рядки; решту простору забирає таблиця
         widths=(43,100,140,160,510,60,150)
         for col,width in zip(cols,widths):
             self.grid.heading(col,text=col)
@@ -234,12 +235,12 @@ class MainApp(WindowBase):
         ttk.Button(actions3,text="МІЙ CLASSROOM — ПЕРЕГЛЯД",
                    command=self.view_classroom).pack(side="right",padx=4)
         ttk.Label(actions3,text="Плани • розклад • бібліотека • дзвоники • допомога").pack(side="left",padx=10)
-        middle=ttk.Frame(outer);middle.pack(fill="both",expand=True)
+        middle=ttk.Frame(outer);middle.pack(fill="x")                 # без expand: зайве місце віддаємо таблиці, а не цьому блоку
         side=ttk.Frame(middle);side.pack(side="right",fill="y",padx=(12,0))      # праворуч: тривога й листочок календаря
         left=ttk.Frame(middle);left.pack(side="left",fill="both",expand=True)     # ліворуч: повідомлення (вужче, ніж було)
         self.alert_panel=AlertPanel(side,self.open_alert_setup)
         self.alert_panel.pack(side="left",padx=(0,10),pady=(10,0))
-        self.leaf=CalendarLeaf(side)
+        self.leaf=CalendarLeaf(side,scale=SIDE_HEIGHT/DESIGN_H,on_click=self.open_leaf_window)    # мініатюра: клац — повний листок
         self.leaf.pack(side="left",pady=(10,0))
         ttk.Label(left,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
         self.desc=tk.Text(left,height=4,wrap="word",font=("Segoe UI",10))
@@ -1936,6 +1937,9 @@ class MainApp(WindowBase):
     def open_alert_setup(self):
         return show_alert_setup(self)
 
+    def open_leaf_window(self):
+        return show_leaf_window(self)
+
     def alert_settings_changed(self):
         """Місце або ключ змінено: перечитати налаштування, запустити/пришвидшити перевірку, оновити листочок."""
         if air_alerts.load_settings(DATA)["key"] and not os.environ.get("POMICHNYK_NO_OFFERS"):
@@ -1957,15 +1961,22 @@ class MainApp(WindowBase):
         self._alert_job=self.after(2000,self._alert_poll)
 
     def _refresh_leaf(self):
-        """Листочок календаря для обраної дати: сонце, Місяць, свята й події (кеш + вбудований список)."""
+        """Листочок календаря для обраної дати: сонце, свята й події (кеш + вбудований список)."""
         try:
             day=parse_date(self.datevar.get())
         except Exception:
             return
         lat,lon=air_alerts.place_coordinates(air_alerts.load_settings(DATA)["place"])
         wiki=day_facts.cached(DATA,day.month,day.day)
-        self.leaf.show(day,lat,lon,self.facts.lookup(day.month,day.day),
-                       "за матеріалами Вікіпедії (CC BY-SA)" if wiki else "вбудований список пам'ятних дат")
+        lines=self.facts.lookup(day.month,day.day)
+        note="за матеріалами Вікіпедії (CC BY-SA)" if wiki else "вбудований список пам'ятних дат"
+        targets=[self.leaf]
+        window=getattr(self,"_single_windows",{}).get("leaf")                # відкритий великий листок теж оновлюємо
+        try:
+            if window is not None and window.winfo_exists():targets.append(window.leaf)
+        except tk.TclError:pass
+        for leaf in targets:
+            leaf.show(day,lat,lon,lines,note)
         self.facts.refresh_async(day.month,day.day)
 
     def _facts_poll(self):

@@ -1,11 +1,9 @@
-"""Схід і захід сонця, довгота дня та фаза Місяця: чисті обчислення без інтернету (для листочка календаря)."""
+"""Схід і захід сонця та довгота дня: чисті обчислення без інтернету (для листочка календаря)."""
 from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta, timezone
 
-SYNODIC = 29.530588853
-NEW_MOON_JD = 2451550.26                     # новий місяць 6 січня 2000, ≈18:14 UTC
 J2000 = 2451545.0
 
 
@@ -63,28 +61,25 @@ def sun_summary(day: date, lat: float, lon: float):
     return local_text(rise), local_text(sunset), day_length_text(length)
 
 
-PHASES = ("Новий місяць", "Молодий місяць", "Перша чверть", "Зростаючий місяць",
-          "Повний місяць", "Спадний місяць", "Остання чверть", "Старий місяць")
+def hm(moment_utc) -> str:
+    """Час за київським часом у «календарному» записі: 7.12, 17.38 (без нуля попереду годин)."""
+    if moment_utc is None:
+        return "—"
+    local = moment_utc + ukraine_offset(moment_utc)
+    return f"{local.hour}.{local.minute:02d}"
 
 
-def moon_age(day: date) -> float:
-    jd = day.toordinal() + 1721425.0                         # полудень цієї дати за UTC
-    return (jd - NEW_MOON_JD) % SYNODIC
+def duration_parts(length: timedelta):
+    """Тривалість як (години, хвилини)."""
+    minutes = int(round(length.total_seconds() / 60))
+    return minutes // 60, minutes % 60
 
 
-def moon_phase(day: date):
-    """(назва фази, освітленість 0…1). Середній синодичний місяць: точність до доби."""
-    age = moon_age(day)
-    illumination = (1 - math.cos(2 * math.pi * age / SYNODIC)) / 2
-    index = int(((age / SYNODIC) * 8 + 0.5) % 8)
-    return PHASES[index], illumination
-
-
-def next_moon_event(day: date):
-    """Найближча повня чи новомісяччя: ('Повня' | 'Новомісяччя', дата)."""
-    age = moon_age(day)
-    to_full = (SYNODIC / 2 - age) % SYNODIC
-    to_new = (SYNODIC - age) % SYNODIC
-    if to_full <= to_new:
-        return "Повня", day + timedelta(days=round(to_full))
-    return "Новомісяччя", day + timedelta(days=round(to_new))
+def sun_card(day: date, lat: float, lon: float):
+    """Дані про Сонце для листочка: схід, захід («7.12», «17.38»), години й хвилини дня. None — полярний день чи ніч."""
+    times = sun_times(day, lat, lon)
+    if not times:
+        return None
+    rise, sunset, length = times
+    hours, mins = duration_parts(length)
+    return {"sunrise": hm(rise), "sunset": hm(sunset), "hours": f"{hours} год.", "minutes": f"{mins:02d} хв."}

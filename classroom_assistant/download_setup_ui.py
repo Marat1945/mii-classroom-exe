@@ -11,7 +11,7 @@ from . import browser_downloads as bd
 from . import lecture_inbox
 from .engine import ROOT
 from .toast import show_toast
-from .window_ui import fit_work_window
+from .window_ui import fit_work_window, remember_window, reuse_window
 
 INTRO = (
     "Куди браузер зберігає завантажене, вирішує сам браузер: сайт і програма цього змінити не можуть. Тому один раз "
@@ -58,7 +58,11 @@ def open_folder(folder) -> None:
 
 
 def show_download_setup(app):
+    existing = reuse_window(app, "download_setup")
+    if existing:                                       # повторний клац не відкриває друге таке саме вікно
+        return existing
     win = tk.Toplevel(app)
+    remember_window(app, "download_setup", win)
     win.title("Куди зберігати файли від GPT")
     fit_work_window(win, "normal")
     win.transient(app)

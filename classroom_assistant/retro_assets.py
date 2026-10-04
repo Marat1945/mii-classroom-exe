@@ -243,3 +243,42 @@ def alert_icon(color, size=112):
     bomb = bomb.resize((scaled, scaled), Image.LANCZOS)
     img.alpha_composite(bomb, ((big - scaled) // 2, (big - scaled) // 2))
     return img.resize((size, size), Image.LANCZOS)
+
+
+def paper_image(width, height, seed=5):
+    """Старий календарний папір: тепла охра, зерно, затемнені краї, плями й підігнуті заокруглені кути (RGBA)."""
+    width, height = max(int(width), 16), max(int(height), 16)
+    rng = random.Random(seed)
+    base = (238, 219, 182)
+    raw = Image.frombytes("L", (width, height), rng.randbytes(width * height))
+    grain = raw.point(lambda v: int(128 + (v - 128) * 0.10)).filter(ImageFilter.GaussianBlur(0.6))
+    paper = Image.merge("RGB", [ImageChops.add(Image.new("L", (width, height), c), grain, 1, -128) for c in base])
+    vignette = Image.new("L", (width, height), 0)
+    d = ImageDraw.Draw(vignette)
+    steps = 24
+    for i in range(steps):                                  # від країв до центру світлішає
+        k = i / (steps - 1)
+        inset = int(min(width, height) * 0.22 * k)
+        d.rectangle((inset, inset, width - inset - 1, height - inset - 1), fill=int(40 * (1 - k)))
+    vignette = vignette.filter(ImageFilter.GaussianBlur(max(3, min(width, height) // 14)))
+    paper = ImageChops.subtract(paper, Image.merge("RGB", [vignette.point(lambda v: v // 2)] * 3))
+    stains = Image.new("L", (width, height), 0)
+    sd = ImageDraw.Draw(stains)
+    for _ in range(7):                                      # легкі плями часу
+        x, y = rng.randrange(width), rng.randrange(height)
+        r = rng.randrange(max(6, width // 14), max(10, width // 5))
+        sd.ellipse((x - r, y - r // 2, x + r, y + r // 2), fill=rng.randrange(8, 20))
+    stains = stains.filter(ImageFilter.GaussianBlur(max(4, width // 22)))
+    paper = ImageChops.subtract(paper, Image.merge("RGB", [stains] * 3))
+    mask = Image.new("L", (width, height), 0)
+    radius = max(6, int(min(width, height) * 0.04))
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius, fill=255)
+    out = paper.convert("RGBA")
+    edge = ImageDraw.Draw(out)
+    edge.rounded_rectangle((0, 0, width - 1, height - 1), radius, outline=(150, 128, 92, 255), width=max(1, width // 160))
+    fold = Image.new("RGBA", (width, height), (0, 0, 0, 0))     # підігнутий верхній правий кут: світліший трикутник
+    size = max(10, int(min(width, height) * 0.10))
+    ImageDraw.Draw(fold).polygon([(width - size, 0), (width, 0), (width, size)], fill=(250, 238, 206, 235), outline=(150, 128, 92, 255))
+    out.alpha_composite(fold)
+    out.putalpha(mask)
+    return out
