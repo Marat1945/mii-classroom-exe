@@ -265,12 +265,13 @@ class MessageAndTasksTests(unittest.TestCase):
 
     def test_standard_message_uses_asterisks_instead_of_numbers(self):
         text = engine.html_classroom_text(self.lesson("Особливості розвитку культури"))
-        for line in ("* Перегляньте прикріплене відео до теми.",
-                     "* Уважно опрацюйте прикріплений матеріал уроку.",
+        for line in ("* Уважно опрацюйте прикріплений матеріал уроку.",
                      "* Наприкінці Word-документа знайдіть «ПЛАН-КОНСПЕКТ УРОКУ ДЛЯ ЗАПИСУ В ЗОШИТ»."):
             self.assertIn(line, text)
         for old in ("1. Перегляньте", "2. Уважно", "3. Наприкінці", "4. ✍"):
             self.assertNotIn(old, text)
+        self.assertNotIn("Перегляньте прикріплене відео", text)                         # пункт про відео прибрано зі стандартного тексту
+        self.assertNotIn("відео", engine.html_classroom_text(self.lesson("Тема")))
         self.assertNotIn("Перегляньте прикріплене відео", engine.html_classroom_text(self.lesson("Тема"), video=False))
 
     def test_practical_and_control_lessons_ask_for_up_to_three_analytical_tasks(self):

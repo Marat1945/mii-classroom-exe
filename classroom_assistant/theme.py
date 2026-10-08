@@ -142,26 +142,109 @@ def apply_theme(root):
         root.option_add("*TCombobox*Listbox.selectForeground", "white")
     except tk.TclError:
         pass
+    try:
+        from . import retro_menu, themed_dialogs
+        retro_menu.install()                              # контекстні меню — у стилі програми
+        themed_dialogs.install()                          # вікна повідомлень — у стилі програми
+    except Exception:
+        pass
     return True
+
+
+_STRIPS = {}
+
+
+def _strip_images(window):
+    """Смужки іржавої металевої рамки (по одному набору на вікно): кеш PIL — спільний, PhotoImage — свій."""
+    if "pil" not in _STRIPS:
+        _STRIPS["pil"] = {
+            "h": assets.frame_strip_image(4096, BORDER_WIDTH, seed=3),
+            "h2": assets.frame_strip_image(4096, BORDER_WIDTH, seed=8),
+            "v": assets.frame_strip_image(BORDER_WIDTH, 2304, vertical=True, seed=5),
+            "v2": assets.frame_strip_image(BORDER_WIDTH, 2304, vertical=True, seed=12),
+        }
+    shared = _STRIPS.setdefault("photos", {})
+    key = id(window.tk)                                                  # зображення спільні для всіх вікон однієї програми
+    try:
+        if key in shared and all(window.tk.call("image", "type", img) for img in shared[key].values()):
+            return shared[key]
+    except tk.TclError:
+        pass
+    shared[key] = {name: assets.photo(image, window) for name, image in _STRIPS["pil"].items()}
+    return shared[key]
+
+
+def add_frame(window):
+    """Іржава металева рамка навколо вікна (поверх звичайної рамки Tk); заклепки додаються окремо."""
+    if not assets.available() or getattr(window, "_frame_strips", None):
+        return
+    try:
+        images = _strip_images(window)
+        outside = {"bordermode": "outside"}                              # відлік від зовнішнього краю вікна, а не від вмісту
+        specs = (("h", {"x": 0, "y": 0, "relwidth": 1, "height": BORDER_WIDTH}),
+                 ("h2", {"x": 0, "rely": 1, "anchor": "sw", "relwidth": 1, "height": BORDER_WIDTH}),
+                 ("v", {"x": 0, "y": 0, "relheight": 1, "width": BORDER_WIDTH}),
+                 ("v2", {"relx": 1, "y": 0, "anchor": "ne", "relheight": 1, "width": BORDER_WIDTH}))
+        labels = []
+        for name, place in specs:
+            label = tk.Label(window, image=images[name], bd=0, highlightthickness=0, anchor="nw", bg=METAL)
+            label.place(**place, **outside)
+            labels.append(label)
+        window._frame_strips = (images, labels)
+    except tk.TclError:
+        pass
+
+
+def inset_frame(parent, **pack):
+    """Рамка-вставка для таблиці чи поля: металевий кант із заклепками по кутах, всередину кладуться звичайні віджети."""
+    frame = tk.Frame(parent, bg="#4F5A50", bd=2, relief="ridge", highlightthickness=4, highlightbackground="#4F5A50")
+    if assets.available():
+        try:
+            image = assets.photo(assets.rivet_image(8), frame)
+            frame._rivet_image = image
+            frame._rivets = []
+            for relx, rely, anchor, dx, dy in ((0, 0, "nw", 0, 0), (1, 0, "ne", 0, 0), (0, 1, "sw", 0, 0), (1, 1, "se", 0, 0)):
+                label = tk.Label(frame, image=image, bd=0, highlightthickness=0, bg="#4F5A50")
+                label.place(relx=relx, rely=rely, anchor=anchor, x=dx, y=dy)
+                frame._rivets.append(label)
+        except tk.TclError:
+            pass
+    return frame
+
+
+def add_title_plate(window):
+    """Металева табличка з назвою угорі діалогу (лише для вікон, де вміст розкладено через pack)."""
+    if getattr(window, "_title_plate", None) is not None:
+        return
+    try:
+        title = window.title()
+        if not title or window.grid_slaves():
+            return
+        from .themed_dialogs import _plate
+        slaves = window.pack_slaves()
+        window._title_plate = _plate(window, title, before=slaves[0] if slaves else None)
+    except tk.TclError:
+        pass
 
 
 def add_rivets(window):
     """Чотири заклепки в кутах металевої рамки вікна (place: не заважає розкладці вмісту)."""
     if not assets.available() or getattr(window, "_rivets", None):
         return
+    add_frame(window)
     try:
         image = assets.photo(assets.rivet_image(BORDER_WIDTH), window)
         labels = []
         for relx, rely, anchor in ((0, 0, "nw"), (1, 0, "ne"), (0, 1, "sw"), (1, 1, "se")):
             label = tk.Label(window, image=image, bd=0, highlightthickness=0, bg=METAL)
-            label.place(relx=relx, rely=rely, anchor=anchor)
+            label.place(relx=relx, rely=rely, anchor=anchor, bordermode="outside")
             labels.append(label)
         window._rivets = (image, labels)
     except tk.TclError:
         pass
 
 
-def make_banner(parent, title, subtitle="", author="", animate=True):
-    """Шапка-прилад: циферблат, лампочка зв'язку, назва, що переливається, табличка автора."""
+def make_banner(parent, title, subtitle="", author="", animate=True, on_materials=None):
+    """Шапка-прилад: циферблат, лампочка зв'язку, назва, що переливається, кнопка «Навчальні матеріали», табличка автора."""
     from .retro_header import InstrumentHeader
-    return InstrumentHeader(parent, title, subtitle, author, animate=animate)
+    return InstrumentHeader(parent, title, subtitle, author, animate=animate, on_materials=on_materials)

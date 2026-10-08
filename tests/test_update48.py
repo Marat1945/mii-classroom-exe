@@ -344,7 +344,8 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(aa.effective_status(red, now=1000.0 + aa.MAX_AGE + 1).level, aa.UNKNOWN)      # навіть червоне не «висить»
 
     def test_settings_round_trip_and_defaults(self):
-        self.assertEqual(aa.load_settings(self.folder), {"provider": aa.UKRAINE_ALARM, "key": "", "place": aa.DEFAULT_PLACE})
+        self.assertEqual(aa.load_settings(self.folder),
+                         {"provider": aa.UKRAINE_ALARM, "key": aa.DEFAULT_KEY, "place": aa.DEFAULT_PLACE})   # вшитий ключ — одразу
         aa.save_settings(self.folder, self.settings(aa.ALERTS_IN_UA, key="  abc  ", place={"name": "Львів", "oblast": "Львівська область"}))
         loaded = aa.load_settings(self.folder)
         self.assertEqual((loaded["provider"], loaded["key"], loaded["place"]["name"]), (aa.ALERTS_IN_UA, "abc", "Львів"))
@@ -601,7 +602,7 @@ class MainWindowTests(TempProgram):
     def test_the_message_field_is_narrower_and_the_alert_and_the_leaf_sit_to_its_right_symmetrically(self):
         app = self.app
         alert, leaf, desc = app.alert_panel, app.leaf, app.desc
-        self.assertLess(desc.winfo_width(), app.winfo_width() - 400)
+        self.assertLess(desc.winfo_width(), app.winfo_width() - 300)
         self.assertLess(desc.winfo_rootx(), alert.winfo_rootx())
         self.assertLess(alert.winfo_rootx(), leaf.winfo_rootx())                     # тривога зліва від листочка
         self.assertEqual(alert.winfo_height(), leaf.winfo_height())                  # однакова висота

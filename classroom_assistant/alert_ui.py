@@ -28,22 +28,36 @@ TITLES = {aa.RED: "Повітряна тривога", aa.YELLOW: "Жовтий 
 
 
 class AlertPanel(tk.Canvas):
-    """Червоний — бомбочка в червоному колі; жовтий — в жовтому; немає тривоги й немає даних — лише напис."""
+    """Червоний — бомбочка в червоному колі; жовтий — в жовтому; немає тривоги й немає даних — лише напис.
+    Малюється у «проєктних» розмірах і масштабується (set_scale): на низьких екранах панель стискається."""
 
     def __init__(self, parent, on_click):
         super().__init__(parent, width=WIDTH, height=HEIGHT, highlightthickness=0, bd=0, bg="#E9DDBF", cursor="hand2")
         self.on_click = on_click
+        self.s = 1.0
+        self._dirty = False
         self.level = aa.UNKNOWN
         self.place = aa.DEFAULT_PLACE["name"]
         self.detail = ""
         self.stamp = ""
         self._images = []
         self._icons = {}
-        self.title_font = tkfont.Font(family="Segoe UI", size=14, weight="bold")
-        self.sub_font = tkfont.Font(family="Segoe UI", size=10)
-        self.small_font = tkfont.Font(family="Segoe UI", size=8)
         self.bind("<Button-1>", lambda _e: self.on_click())
         self.draw()
+
+    def set_scale(self, s, redraw=True):
+        """Інший розмір панелі; redraw=False — лише розміри (підбір розкладки), малюнок перемальовується згодом."""
+        s = max(0.4, min(1.0, float(s)))
+        same = abs(s - self.s) < 0.01 and int(self.cget("height")) == round(HEIGHT * s)
+        if same and not (redraw and self._dirty):                         # розмір той самий і малюнок свіжий — нічого не робимо
+            return
+        self.s = s
+        self._icons = {}
+        self.configure(width=round(WIDTH * s), height=round(HEIGHT * s))
+        if redraw:
+            self.draw()
+        else:
+            self._dirty = True                                            # розмір змінено, а малюнок ще ні
 
     def show(self, status: aa.Status, place: str):
         self.level, self.place, self.detail = status.level, place, status.detail
@@ -53,34 +67,43 @@ class AlertPanel(tk.Canvas):
 
     def _icon(self, level):
         if level not in self._icons and assets.available():
-            self._icons[level] = assets.photo(assets.alert_icon(LEVEL_COLORS[level], 108), self)
+            self._icons[level] = assets.photo(assets.alert_icon(LEVEL_COLORS[level], max(30, round(108 * self.s))), self)
         return self._icons.get(level)
+
+    def _font(self, px, weight="normal"):
+        return tkfont.Font(family="Segoe UI", size=-max(8, round(px * self.s)), weight=weight)
 
     def draw(self):
         self.delete("all")
         self._images = []
+        self._dirty = False
+        k = self.s
+        width, plate_h = round(WIDTH * k), round(PLATE_HEIGHT * k)
         if assets.available():
-            plate = assets.photo(assets.plate_image(WIDTH - 6, PLATE_HEIGHT), self)
+            plate = assets.photo(assets.plate_image(max(20, width - 6), max(20, plate_h), radius=max(6, round(12 * k))), self)
             self._images.append(plate)
             self.create_image(3, 3, anchor="nw", image=plate)
         else:
-            self.create_rectangle(3, 3, WIDTH - 3, PLATE_HEIGHT, fill="#242A26", outline="#12150F")
-        cream = "#F1EAD2"
+            self.create_rectangle(3, 3, width - 3, plate_h, fill="#242A26", outline="#12150F")
+        cream, muted = "#F1EAD2", "#C9C2A8"
+        middle = width // 2
+        title_font, sub_font = self._font(19, "bold"), self._font(13)
         if self.level in LEVEL_COLORS:
             icon = self._icon(self.level)
             if icon:
-                self.create_image(WIDTH // 2, 70, image=icon)
-            self.create_text(WIDTH // 2, 148, text=TITLES[self.level], font=self.title_font, fill=cream,
-                             width=WIDTH - 30, justify="center")
-            self.create_text(WIDTH // 2, 194, text=self.detail or SUBTITLES[self.level], font=self.sub_font,
-                             fill="#C9C2A8", width=WIDTH - 36, justify="center")
+                self.create_image(middle, round(70 * k), image=icon)
+            self.create_text(middle, round(148 * k), text=TITLES[self.level], font=title_font, fill=cream,
+                             width=width - 30, justify="center")
+            self.create_text(middle, round(194 * k), text=self.detail or SUBTITLES[self.level], font=sub_font,
+                             fill=muted, width=width - 36, justify="center")
         else:
-            self.create_text(WIDTH // 2, 96, text=TITLES[self.level], font=self.title_font,
-                             fill=cream if self.level == aa.NONE else "#C9C2A8", width=WIDTH - 30, justify="center")
-            self.create_text(WIDTH // 2, 152, font=self.sub_font, fill="#C9C2A8", width=WIDTH - 36, justify="center",
+            self.create_text(middle, round(96 * k), text=TITLES[self.level], font=title_font,
+                             fill=cream if self.level == aa.NONE else muted, width=width - 30, justify="center")
+            self.create_text(middle, round(152 * k), font=sub_font, fill=muted, width=width - 36, justify="center",
                              text=self.stamp or self.detail or SUBTITLES[self.level])
-        self.create_text(WIDTH // 2, PLATE_HEIGHT + 32, text=CAPTION.format(place=self.place), font=self.small_font,
-                         fill="#5E5039", width=WIDTH - 18, justify="center")
+        caption = CAPTION.format(place=self.place) if k >= 0.7 else f"Обрано: {self.place} · клац — змінити"
+        self.create_text(middle, plate_h + round(32 * k), text=caption, font=self._font(11),
+                         fill="#5E5039", width=width - 14, justify="center")
 
     def text_items(self) -> list:
         return [self.itemcget(i, "text") for i in self.find_all() if self.type(i) == "text"]
@@ -204,12 +227,18 @@ def show_alert_setup(app):
     ttk.Entry(key_row, textvariable=key, show="•").pack(side="left", fill="x", expand=True, padx=6)
     ttk.Button(key_row, text="Отримати ключ (відкрити сайт)",
                command=lambda: webbrowser.open(aa.KEY_FORMS[provider.get()])).pack(side="left")
+    ttk.Label(source_box, foreground="#5E5039", font=("Segoe UI", 8),
+              text="Ключ Ukraine Alarm уже вбудовано в програму: тривога працює одразу. Тут його можна замінити на свій."
+              ).pack(anchor="w", pady=(4, 0))
     result = tk.StringVar(master=win, value="")
     win.result = result
     ttk.Label(source_box, textvariable=result, wraplength=780, justify="left", foreground="#5E5039").pack(anchor="w", pady=(6, 0))
 
     def collect():
-        return {"provider": provider.get(), "key": key.get().strip(), "place": chosen["place"]}
+        typed = key.get().strip()
+        if provider.get() != aa.UKRAINE_ALARM and typed == aa.DEFAULT_KEY:           # вшитий ключ — не для іншого джерела
+            typed = ""
+        return {"provider": provider.get(), "key": typed, "place": chosen["place"]}
 
     def check():
         """Перевірка у фоні; результат забирає головний потік (Tk із чужого потоку не чіпаємо)."""

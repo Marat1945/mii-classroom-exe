@@ -50,6 +50,7 @@ class CalendarLeaf(tk.Canvas):
         self.scale = scale
         super().__init__(parent, width=round(DESIGN_W * scale), height=round(DESIGN_H * scale),
                          highlightthickness=0, bd=0, bg=BACKGROUND, cursor="hand2" if on_click else "")
+        self._dirty = False
         self.day = None
         self.lines = []
         self.note = ""
@@ -85,6 +86,19 @@ class CalendarLeaf(tk.Canvas):
         k = self.scale
         self.create_line(x1 * k, y1 * k, x2 * k, y2 * k, fill=fill, width=max(1, round(width * k)))
 
+    def set_scale(self, scale: float, redraw: bool = True):
+        """Інший розмір того самого листка (на низьких екранах мініатюра стискається)."""
+        same = abs(scale - self.scale) < 0.003 and int(self.cget("height")) == round(DESIGN_H * scale)
+        if same and not (redraw and self._dirty):
+            return
+        self.scale = scale
+        self._real = {}
+        self.configure(width=round(DESIGN_W * scale), height=round(DESIGN_H * scale))
+        if redraw:
+            self.draw()
+        else:
+            self._dirty = True
+
     # ---------- дані ----------
     def show(self, day: date, lat: float, lon: float, lines, note: str = ""):
         """note — підпис джерела внизу: «за матеріалами Вікіпедії (CC BY-SA)» лише коли дані справді звідти."""
@@ -95,6 +109,7 @@ class CalendarLeaf(tk.Canvas):
     # ---------- малювання ----------
     def draw(self):
         self.delete("all")
+        self._dirty = False
         self.shown, self._images = [], []
         k = self.scale
         left, top, right, bottom = PAPER_BOX

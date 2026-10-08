@@ -63,7 +63,7 @@ class TableTests(TempProgram):
         self.app._fit_columns()
         widths = self.widths()
         available = self.grid.winfo_width() - 6
-        self.assertGreaterEqual(widths["Тема"], 0.45 * available)
+        self.assertGreaterEqual(widths["Тема"], 0.40 * available)                        # «№» став ширшим: там живе дзвіночок
         self.assertGreaterEqual(widths["Стан"], 150)
         self.app.geometry("1900x900")                                    # ширше вікно — «Тема» ще ширша
         self.pump()

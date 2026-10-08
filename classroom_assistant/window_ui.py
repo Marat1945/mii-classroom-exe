@@ -44,8 +44,9 @@ def fit_work_window(window,kind="normal",minimum=None):
     ratio_w,ratio_h,min_w,min_h=SIZE_PRESETS[kind]
     if minimum:min_w,min_h=minimum
     try:
-        from .theme import add_rivets
-        add_rivets(window)                               # заклепки в кутах металевої рамки
+        from .theme import add_rivets, add_title_plate
+        add_title_plate(window)                          # металева табличка з назвою угорі
+        add_rivets(window)                               # іржава рамка й заклепки в кутах
     except Exception:
         pass
 

@@ -20,7 +20,7 @@ from .attachments import add_attachments, files_for_lesson, copy_attachments, re
 from .window_ui import maximize_work_window, fit_work_window
 from .ui_kit import AccentButton, FlowRow
 from .hotkeys import install_hotkeys
-from .theme import apply_theme, make_banner, add_rivets
+from .theme import FONT, apply_theme, inset_frame, make_banner, add_rivets
 from . import connectivity
 from .history import History, describe_change
 from .datepicker import pick_date
@@ -28,6 +28,8 @@ from . import air_alerts, browser_downloads, data_tools, day_facts, file_match, 
 from . import app_icon
 from .alert_ui import AlertPanel, show_alert_setup
 from .calendar_leaf import DESIGN_H, CalendarLeaf, show_leaf_window
+from .lesson_marks import LessonMarks
+from .materials_ui import show_materials
 from .alert_ui import HEIGHT as SIDE_HEIGHT
 from .toast import show_toast
 try:
@@ -87,7 +89,7 @@ class MainApp(WindowBase):
         self.header=make_banner(self,"Помічник учителя Classroom",
                     "розклад  •  календарні плани  •  лекції через ChatGPT  •  чернетки Google Classroom",
                     author="Розробник програми — вчитель історії Пасічник Іван Олегович",
-                    animate=not os.environ.get("POMICHNYK_NO_OFFERS"))
+                    animate=not os.environ.get("POMICHNYK_NO_OFFERS"),on_materials=self.open_materials)
         self.header.pack(fill="x",pady=(0,6))
         self._sync_running=False;self._sync_again=False;self._last_sync_ts=0.0
         self._inbox_busy=False;self._last_matched_sources=set()
@@ -109,6 +111,10 @@ class MainApp(WindowBase):
             self._net_job=self.after(1200,self._net_poll)
             if air_alerts.load_settings(DATA)["key"]:
                 self.alerts.start()
+        self.density=1.0
+        self.bind("<Configure>",self._schedule_density,add="+")           # перерахувати розміри блоків під висоту вікна
+        self.clock=datetime.now                                          # годинник програми (у тестах підміняється)
+        self.lesson_marks=LessonMarks(self)
         self._alert_job=self.after(500,self._alert_poll)
         self._facts_job=self.after(1500,self._facts_poll)
         self.update_day()
@@ -159,7 +165,7 @@ class MainApp(WindowBase):
 
         cols=("№","Час","Потік","Курс Classroom","Тема","КТП","Стан")
         self.grid_columns=cols
-        table_frame=ttk.Frame(outer);table_frame.pack(fill="both",expand=True)
+        table_frame=inset_frame(outer);table_frame.pack(fill="both",expand=True,pady=(2,0))     # таблиця в металевій рамці із заклепками
         self.grid=ttk.Treeview(table_frame,columns=cols,show="headings",
                                 selectmode="extended",height=3)          # мінімум 3 рядки; решту простору забирає таблиця
         widths=(43,100,140,160,510,60,150)
@@ -167,6 +173,8 @@ class MainApp(WindowBase):
             self.grid.heading(col,text=col)
             self.grid.column(col,width=width,minwidth=42,anchor="w",stretch=(col=="Тема"))
         self.grid.tag_configure("ready",background="#DCE8B8")            # Word є, чернетки ще немає: готово до створення
+        self.grid.tag_configure("odd",background="#EEE2C4")              # смугастість рядків, як у паперовій відомості
+        self.grid.tag_configure("even",background="#F6EEDA")
         self._fit_job=None;self._resize_start=False
         self.grid.bind("<Configure>",lambda _e:self._schedule_fit(),add="+")
         sy=ttk.Scrollbar(table_frame,orient="vertical",command=self.grid.yview)
@@ -243,7 +251,8 @@ class MainApp(WindowBase):
         self.leaf=CalendarLeaf(side,scale=SIDE_HEIGHT/DESIGN_H,on_click=self.open_leaf_window)    # мініатюра: клац — повний листок
         self.leaf.pack(side="left",pady=(10,0))
         ttk.Label(left,text="Повідомлення для Classroom (можна редагувати тут перед створенням чернетки):").pack(anchor="w",pady=(10,1))
-        self.desc=tk.Text(left,height=4,wrap="word",font=("Segoe UI",10))
+        desc_frame=inset_frame(left);desc_frame.pack(fill="both",expand=True)
+        self.desc=tk.Text(desc_frame,height=4,wrap="word",font=("Segoe UI",10))
         self.desc.pack(fill="both",expand=True)
         self.desc.bind("<Button-3>",self._description_context_menu)
         self.attachment_toolbar=ttk.Frame(left)
@@ -339,8 +348,10 @@ class MainApp(WindowBase):
             ready=bool(doc.get("complete") and not item and not remote and row.status=="готово")
             self.grid.insert("", "end",iid=str(k),values=(row.period,f"{row.begin}–{row.end}",
                      row.stream,row.course_title,adjusted.topic,row.lesson_number,status),
-                     tags=(("ready",) if ready else ()))
+                     tags=(("ready",) if ready else (("odd",) if k%2 else ("even",))))
         self._schedule_fit(0)
+        marks=getattr(self,"lesson_marks",None)
+        if marks:marks.refresh()                                         # дзвіночок і рамка часу — для нової дати/розкладу
         self._refresh_leaf()
         self.desc.delete("1.0","end")
         if self.rows:
@@ -972,10 +983,10 @@ class MainApp(WindowBase):
         def need(col,minimum,cap):
             texts=[col]+[str(r[index[col]]) for r in rows]
             return max(minimum,min(cap,max(font.measure(t) for t in texts)+28))
-        spec={"№":(44,70),"Час":(104,150),"Потік":(96,230),"Курс Classroom":(120,280),"КТП":(50,80),"Стан":(150,420)}
+        spec={"№":(66,90),"Час":(104,150),"Потік":(96,230),"Курс Classroom":(120,280),"КТП":(50,80),"Стан":(150,420)}
         widths={c:need(c,*spec[c]) for c in spec}
         # мінімуми: «Стан» (статуси чернеток) лишається читабельним, решта стискається сильніше
-        floor={"№":44,"Час":104,"Потік":min(widths["Потік"],160),"Курс Classroom":min(widths["Курс Classroom"],160),
+        floor={"№":66,"Час":104,"Потік":min(widths["Потік"],160),"Курс Classroom":min(widths["Курс Classroom"],160),
                "КТП":50,"Стан":min(widths["Стан"],260)}
         topic_need=need("Тема",260,4000)
         topic=available-sum(widths.values())
@@ -1398,6 +1409,8 @@ class MainApp(WindowBase):
             except tk.TclError:pass
         try:save_state(self.state)
         except Exception:pass
+        marks=getattr(self,"lesson_marks",None)
+        if marks:marks.stop()
         for monitor in (getattr(self,"net",None),getattr(self,"alerts",None)):
             try:monitor.stop()
             except Exception:pass
@@ -1934,11 +1947,57 @@ class MainApp(WindowBase):
         (інакше діти не зможуть прикріпити відповідь). Галочка «Усе як завдання» вмикає це для всіх."""
         return bool(self.assignment.get()) or is_task_lesson(lesson.topic)
 
+    # (масштаб блоків, вужчі кнопки, сховати смугу мініатюр вкладень — лише на дуже низьких екранах)
+    DENSITY_LEVELS=((1.0,False,False),(0.94,False,False),(0.88,False,False),(0.82,True,False),(0.76,True,False),
+                    (0.70,True,False),(0.64,True,False),(0.58,True,False),(0.52,True,False),(0.46,True,True))
+
+    def _apply_density(self,event=None):
+        """Низький екран: стискаємо шапку, тривогу й листочок, доки все не вміститься (замість стиснутої таблиці)."""
+        if event is not None and event.widget is not self:return
+        self._density_job=None
+        height=self.winfo_height()
+        if height<300:return
+        chosen=self.DENSITY_LEVELS[-1]
+        for level in self.DENSITY_LEVELS:
+            self._set_density(*level,redraw=False)                    # підбір: лише розміри, без перемальовування
+            self.update_idletasks()
+            if self.winfo_reqheight()<=height:
+                chosen=level;break
+        self._set_density(*chosen)                                    # остаточно: перемалювати вже в обраному розмірі
+        self.density=chosen[0]
+        self.ultra=chosen[2]
+
+    def _set_density(self,s,compact=False,ultra=False,redraw=True):
+        if ultra:self.attachment_bar.pack_forget()
+        elif not self.attachment_bar.winfo_manager():self.attachment_bar.pack(fill="x",pady=(2,4))
+        style=ttk.Style(self)
+        style.configure("TButton",padding=(4,1) if compact else (6,3),font=(FONT,9 if compact else 10,"bold"))
+        stack=[self]
+        while stack:                                                  # вужчі кнопки: ряди переносяться рідше й займають менше висоти
+            widget=stack.pop();stack.extend(widget.winfo_children())
+            if isinstance(widget,FlowRow):widget._layout()
+            elif isinstance(widget,AccentButton):widget.configure(padx=8 if compact else 14,pady=2 if compact else 5)
+        self.header.set_scale(s)
+        self.alert_panel.set_scale(s,redraw=redraw)
+        self.leaf.set_scale(SIDE_HEIGHT*s/DESIGN_H,redraw=redraw)
+        self.desc.configure(height=4 if s>=0.86 else (3 if s>=0.7 else 2))
+
+    def _schedule_density(self,event=None):
+        if event is not None and event.widget is not self:return
+        job=getattr(self,"_density_job",None)
+        if job:
+            try:self.after_cancel(job)
+            except tk.TclError:pass
+        self._density_job=self.after(200,self._apply_density)
+
     def open_alert_setup(self):
         return show_alert_setup(self)
 
     def open_leaf_window(self):
         return show_leaf_window(self)
+
+    def open_materials(self):
+        return show_materials(self)
 
     def alert_settings_changed(self):
         """Місце або ключ змінено: перечитати налаштування, запустити/пришвидшити перевірку, оновити листочок."""

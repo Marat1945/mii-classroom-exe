@@ -282,3 +282,63 @@ def paper_image(width, height, seed=5):
     out.alpha_composite(fold)
     out.putalpha(mask)
     return out
+
+
+def dialog_icon(kind, size=64):
+    """Значок вікна повідомлення: «i» (синій), «!» (бурштиновий), «✕» (червоний), «?» (мідний): круглі, з металевим обідком."""
+    big = size * SCALE
+    img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    palette = {"info": ((54, 118, 190), (255, 255, 255)), "warning": ((226, 164, 40), (60, 40, 10)),
+               "error": ((196, 52, 44), (255, 255, 255)), "question": ((196, 150, 84), (52, 36, 20))}
+    fill, ink = palette.get(kind, palette["info"])
+    c = big / 2
+    for i in range(10):                                                # металевий обідок
+        k = i / 9
+        r = c - SCALE - k * big * 0.05
+        d.ellipse((c - r, c - r, c + r, c + r), fill=_mix((176, 170, 150), (58, 50, 40), k) + (255,))
+    inner = c * 0.80
+    for i in range(12):                                                # коло з легким світлом зверху
+        k = i / 11
+        r = inner * (1 - k * 0.04)
+        d.ellipse((c - r, c - r - k * big * 0.02, c + r, c + r - k * big * 0.02),
+                  fill=_mix(tuple(min(255, int(v * 1.18)) for v in fill), fill, k) + (255,))
+    w = max(2, int(big * 0.09))
+    ink4 = ink + (255,)
+    if kind == "info":
+        d.ellipse((c - w * 0.9, c - big * 0.27, c + w * 0.9, c - big * 0.27 + w * 1.8), fill=ink4)
+        d.rounded_rectangle((c - w * 0.9, c - big * 0.10, c + w * 0.9, c + big * 0.27), w // 2, fill=ink4)
+    elif kind == "warning":
+        d.rounded_rectangle((c - w * 0.9, c - big * 0.27, c + w * 0.9, c + big * 0.06), w // 2, fill=ink4)
+        d.ellipse((c - w * 0.95, c + big * 0.13, c + w * 0.95, c + big * 0.13 + w * 1.9), fill=ink4)
+    elif kind == "error":
+        a = big * 0.20
+        d.line((c - a, c - a, c + a, c + a), fill=ink4, width=int(w * 1.3))
+        d.line((c - a, c + a, c + a, c - a), fill=ink4, width=int(w * 1.3))
+    else:
+        d.arc((c - big * 0.17, c - big * 0.30, c + big * 0.17, c + big * 0.04), 180, 400, fill=ink4, width=int(w * 1.15))
+        d.line((c + big * 0.14, c - big * 0.07, c + big * 0.02, c + big * 0.03), fill=ink4, width=int(w * 1.15))
+        d.line((c, c + big * 0.03, c, c + big * 0.10), fill=ink4, width=int(w * 1.15))
+        d.ellipse((c - w * 0.9, c + big * 0.16, c + w * 0.9, c + big * 0.16 + w * 1.8), fill=ink4)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def frame_strip_image(length, thickness, vertical=False, seed=3):
+    """Смужка металевої рамки вікна: зеленувато-сірий метал, іржа, подряпини й тонка мідна лінія з внутрішнього боку."""
+    length, thickness = max(int(length), 8), max(int(thickness), 4)
+    rng = random.Random(seed)
+    base = metal_image(length, thickness, base=(88, 98, 88), seed=seed).convert("RGBA")
+    rust = Image.new("RGBA", (length, thickness), (0, 0, 0, 0))
+    rd = ImageDraw.Draw(rust)
+    for _ in range(max(10, length // 26)):                                      # іржаві плями й патьоки
+        x, y = rng.randrange(length), rng.randrange(thickness)
+        rx, ry = rng.randrange(5, 30), rng.randrange(1, max(2, thickness // 2 + 1))
+        tone = rng.choice(((150, 76, 36), (126, 62, 30), (170, 98, 48), (104, 54, 28)))
+        rd.ellipse((x - rx, y - ry, x + rx, y + ry), fill=tone + (rng.randrange(60, 150),))
+    rust = rust.filter(ImageFilter.GaussianBlur(1.1))
+    base.alpha_composite(rust)
+    inner = ImageDraw.Draw(base)
+    inner.line((0, thickness - 2, length, thickness - 2), fill=(176, 132, 62, 255), width=1)       # мідний кант (внутрішній бік)
+    inner.line((0, thickness - 1, length, thickness - 1), fill=(60, 44, 24, 255), width=1)
+    inner.line((0, 0, length, 0), fill=(150, 160, 146, 200), width=1)                                # світла грань зовні
+    return base.transpose(Image.ROTATE_90) if vertical else base

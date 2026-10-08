@@ -368,6 +368,18 @@ def show_data_folder(parent):
         open_folder(folder)
     ttk.Button(bar, text="🗄 Папка резервних копій", command=open_backups).pack(side="left")
 
+    link_bar = ttk.Frame(win, padding=(14, 4))
+    link_bar.pack(fill="x")
+
+    def make_shortcut():
+        from .shortcut import create_desktop_shortcut
+        ok, message = create_desktop_shortcut(ROOT)
+        (messagebox.showinfo if ok else messagebox.showwarning)("Ярлик програми", message, parent=win)
+    ttk.Button(link_bar, text="🖼 Створити ярлик з логотипом на робочому столі", command=make_shortcut).pack(side="left")
+    ttk.Label(link_bar, foreground="#365777", wraplength=560, justify="left",
+              text="Ярлик завжди показує логотип програми, навіть якщо сам файл .exe ще зі стандартною іконкою."
+              ).pack(side="left", padx=10)
+
     def default_name(prefix):
         from datetime import datetime
         return f"{prefix} {datetime.now():%Y-%m-%d %H-%M}.zip"

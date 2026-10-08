@@ -33,6 +33,11 @@ ALERTS_IN_UA = "alertsinua"
 KEY_FORMS = {UKRAINE_ALARM: "https://api.ukrainealarm.com", ALERTS_IN_UA: "https://alerts.in.ua/api-request"}
 PROVIDER_NAMES = {UKRAINE_ALARM: "Ukraine Alarm (державна система)", ALERTS_IN_UA: "alerts.in.ua"}
 
+# Ключ Ukraine Alarm, вшитий у програму за бажанням її автора: працює одразу на кожному комп'ютері. Змінити — у вікні
+# «Повітряна тривога» (клац по малюнку): збережений там ключ має пріоритет. Ключ особистий: не передавайте програму іншим
+# вчителям із ним і не публікуйте його в загальнодоступному репозиторії.
+DEFAULT_KEY = "71680c3f:cd6f222b95e33791bd3eaf746bba0307"
+
 DEFAULT_PLACE = {"name": "Київ", "oblast": "м. Київ"}
 
 # Область (або м. Київ) → координати центру: для схід/захід сонця й швидкого вибору місця без інтернету.
@@ -121,8 +126,10 @@ def load_settings(data_dir) -> dict:
             raise ValueError
     except (OSError, ValueError):
         data = {}
-    return {"provider": data.get("provider") if data.get("provider") in PROVIDER_NAMES else UKRAINE_ALARM,
-            "key": str(data.get("key") or "").strip(),
+    provider = data.get("provider") if data.get("provider") in PROVIDER_NAMES else UKRAINE_ALARM
+    stored = str(data.get("key") or "").strip()
+    return {"provider": provider,
+            "key": stored or (DEFAULT_KEY if provider == UKRAINE_ALARM else ""),     # вшитий ключ — лише для Ukraine Alarm
             "place": clean_place(data.get("place"))}
 
 

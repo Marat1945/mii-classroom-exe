@@ -79,9 +79,14 @@ def next_glint_delay_ms(rng=random):
 
 
 class InstrumentHeader(tk.Canvas):
-    def __init__(self, parent, title, subtitle="", author="", rng=None, animate=True):
+    """Шапка-прилад. Малюється у «проєктних» розмірах і масштабується (set_scale): на низьких екранах вона стискається,
+    щоб лишилось місце таблиці й повідомленню."""
+
+    def __init__(self, parent, title, subtitle="", author="", rng=None, animate=True, on_materials=None):
         super().__init__(parent, height=HEIGHT, highlightthickness=0, bd=0, bg="#2f3631")
         self.title_text, self.subtitle_text, self.author_text = title, subtitle, author
+        self.on_materials = on_materials
+        self.s = 1.0
         self.online = None
         self.angle = 0.0
         self.rng = rng or random.Random()
@@ -95,12 +100,28 @@ class InstrumentHeader(tk.Canvas):
         self._tick_job = None
         self._glint_job = None
         self._width_drawn = 0
+        self._mat_images = {}
+        self._mat_item = None
         self.pivot = (62, 66)
         self.bind("<Configure>", self._schedule_layout)
         self.bind("<Destroy>", self._on_destroy)
         if animate:
             self._tick_job = self.after(80, self._tick)
             self._glint_job = self.after(min(4000, next_glint_delay_ms(self.rng)), self._start_glint)
+
+    # ---------- масштаб ----------
+    def px(self, value) -> int:
+        return max(1, round(value * self.s))
+
+    def set_scale(self, s):
+        """Стиснути чи розтягнути шапку (0,55…1): на низьких екранах вона займає менше місця."""
+        s = max(0.5, min(1.0, float(s)))
+        if abs(s - self.s) < 0.01:
+            return
+        self.s = s
+        self.configure(height=self.px(HEIGHT))
+        self._width_drawn = 0
+        self._schedule_layout()
 
     # ---------- стан ----------
     def set_online(self, online):
@@ -124,10 +145,13 @@ class InstrumentHeader(tk.Canvas):
         self.delete("all")
         self._images = []
         self._char_items = []
+        self._mat_item = None
+        self._geometry(width)
         if not assets.available():
             self.configure(bg="#2f3631")
         else:
             self._draw_textures(width)
+        self._draw_materials_button()
         self._draw_text(width)
         self._draw_needle_and_lamp()
 
@@ -135,46 +159,90 @@ class InstrumentHeader(tk.Canvas):
         self._images.append(image)
         return image
 
+    def _geometry(self, width):
+        """Розкладка шапки (усе кратне масштабу): прилад, табличка назви, кнопка «Навчальні матеріали», табличка автора."""
+        p, height = self.px, self.px(HEIGHT)
+        author_w = p(360 if width >= 1000 else 300)
+        self._author_box = (width - author_w - p(16), p(12), width - p(16), height - p(12))
+        button_w = p(150) if self.on_materials else 0
+        gap = p(12) if self.on_materials else 0
+        self._button_box = (self._author_box[0] - gap - button_w, p(22), self._author_box[0] - gap, height - p(22))
+        right = (self._button_box[0] - p(12)) if self.on_materials else self._author_box[0] - p(14)
+        self._title_box = (p(196), p(10), right, height - p(10))
+        self.pivot = (p(62), p(66))
+
     def _draw_textures(self, width):
-        self.create_image(0, 0, anchor="nw", image=self._keep(assets.photo(assets.metal_image(width, HEIGHT), self)))
-        self.create_image(14, 6, anchor="nw", image=self._keep(assets.photo(assets.dial_image(96), self)))
-        self.create_image(128, 32, anchor="nw", image=self._keep(assets.photo(assets.lamp_bezel_image(44), self)))
-        author_w = 360 if width >= 1000 else 300
-        self._author_box = (width - author_w - 16, 12, width - 16, HEIGHT - 12)
-        left = 196
-        right = self._author_box[0] - 14
-        self._title_box = (left, 10, right, HEIGHT - 10)
+        p, height = self.px, self.px(HEIGHT)
+        self.create_image(0, 0, anchor="nw", image=self._keep(assets.photo(assets.metal_image(width, height), self)))
+        self.create_image(p(14), p(6), anchor="nw", image=self._keep(assets.photo(assets.dial_image(p(96)), self)))
+        self.create_image(p(128), p(32), anchor="nw", image=self._keep(assets.photo(assets.lamp_bezel_image(p(44)), self)))
         for box in (self._title_box, self._author_box):
             w, h = box[2] - box[0], box[3] - box[1]
-            self.create_image(box[0], box[1], anchor="nw", image=self._keep(assets.photo(assets.plate_image(w, h), self)))
-        rivet = self._keep(assets.photo(assets.rivet_image(11), self))
+            self.create_image(box[0], box[1], anchor="nw",
+                              image=self._keep(assets.photo(assets.plate_image(w, h, radius=p(12)), self)))
+        rivet = self._keep(assets.photo(assets.rivet_image(p(11)), self))
+        inset = p(9)
         for box in (self._title_box, self._author_box):
-            for x, y in ((box[0] + 9, box[1] + 9), (box[2] - 9, box[1] + 9), (box[0] + 9, box[3] - 9), (box[2] - 9, box[3] - 9)):
+            for x, y in ((box[0] + inset, box[1] + inset), (box[2] - inset, box[1] + inset),
+                         (box[0] + inset, box[3] - inset), (box[2] - inset, box[3] - inset)):
                 self.create_image(x, y, image=rivet)
 
+    def _draw_materials_button(self):
+        """Кнопка «Навчальні матеріали» ліворуч від таблички автора: латунна пластина, при наведенні світлішає."""
+        if not self.on_materials:
+            return
+        left, top, right, bottom = self._button_box
+        w, h = right - left, bottom - top
+        font = tkfont.Font(family=TITLE_FONT_FAMILY, size=-self.px(14), weight="bold")
+        if assets.available():
+            self._mat_images = {state: assets.photo(assets.button_image(state, w, h), self) for state in ("normal", "hover", "pressed")}
+            self._images.extend(self._mat_images.values())
+            self._mat_item = self.create_image(left, top, anchor="nw", image=self._mat_images["normal"], tags="materials")
+        else:
+            self._mat_item = self.create_rectangle(left, top, right, bottom, fill="#D4C497", outline="#3A3127", tags="materials")
+        self.create_text((left + right) / 2, (top + bottom) / 2, text="Навчальні\nматеріали", justify="center", font=font,
+                         fill="#2A2118", tags=("materials", "materials_text"))
+        self.tag_bind("materials", "<Enter>", lambda _e: self._mat_state("hover"))
+        self.tag_bind("materials", "<Leave>", lambda _e: self._mat_state("normal"))
+        self.tag_bind("materials", "<ButtonPress-1>", lambda _e: self._mat_state("pressed"))
+        self.tag_bind("materials", "<ButtonRelease-1>", self._mat_release)
+        self.tag_bind("materials", "<Enter>", lambda _e: (self._mat_state("hover"), self.configure(cursor="hand2")), add="+")
+        self.tag_bind("materials", "<Leave>", lambda _e: self.configure(cursor=""), add="+")
+
+    def _mat_state(self, state):
+        if self._mat_item and self._mat_images:
+            self.itemconfigure(self._mat_item, image=self._mat_images[state])
+
+    def _mat_release(self, _event=None):
+        self._mat_state("hover")
+        if self.on_materials:
+            self.on_materials()
+
     def _draw_text(self, width):
-        if not hasattr(self, "_title_box"):
-            self._title_box = (196, 10, width - 392, HEIGHT - 10)
-            self._author_box = (width - 376, 12, width - 16, HEIGHT - 12)
+        p = self.px
         left, top, right, bottom = self._title_box
         center = (left + right) / 2
-        title_font = tkfont.Font(family=TITLE_FONT_FAMILY, size=23, weight="bold")
-        small = tkfont.Font(family=TITLE_FONT_FAMILY, size=9)
+        title_font = tkfont.Font(family=TITLE_FONT_FAMILY, size=-p(30), weight="bold")
+        small = tkfont.Font(family=TITLE_FONT_FAMILY, size=-max(8, p(12)))
         total = title_font.measure(self.title_text)
-        icon_w = 44 if assets.available() else 0
+        icon_w = p(44) if assets.available() else 0
+        while total + icon_w > (right - left) - p(36) and title_font.cget("size") < -9:       # вузька табличка: зменшити назву
+            title_font = tkfont.Font(family=TITLE_FONT_FAMILY, size=title_font.cget("size") + 1, weight="bold")
+            total = title_font.measure(self.title_text)
         start = center - (total + icon_w) / 2 + icon_w
+        title_y, subtitle_y = p(40), p(75)
         if assets.available():
-            self.create_image(start - 26, 38, image=self._keep(assets.photo(assets.mortarboard_image(40), self)))
-        self.create_text(center, 38, text=self.title_text, state="hidden", tags="title_full")
+            self.create_image(start - p(26), p(38), image=self._keep(assets.photo(assets.mortarboard_image(p(40)), self)))
+        self.create_text(center, title_y, text=self.title_text, state="hidden", tags="title_full")
         self._char_xs, self._char_items = [], []
         for index, char in enumerate(self.title_text):
             x = start + title_font.measure(self.title_text[:index])
             self._char_xs.append(x - start)
-            self._char_items.append(self.create_text(x + 1, 40, text=char, anchor="w", font=title_font,
+            self._char_items.append(self.create_text(x + 1, title_y, text=char, anchor="w", font=title_font,
                                                      fill=hexcolor(BASE_TITLE)))
         self._title_span = (start, max(total, 1))
-        if self.subtitle_text:
-            self.create_text(center, 74, text=self.subtitle_text, font=small, fill="#cfc7a6")
+        if self.subtitle_text and self.s >= 0.7:
+            self.create_text(center, subtitle_y, text=self.subtitle_text, font=small, fill="#cfc7a6")
         if self.author_text:
             lines = self.author_text
             if "—" in lines and "\n" not in lines:
@@ -182,18 +250,22 @@ class InstrumentHeader(tk.Canvas):
                 lines = head.strip() + " —\n" + tail.strip()
             box = self._author_box
             self.create_text((box[0] + box[2]) / 2, (box[1] + box[3]) / 2, text=lines, justify="center",
-                             font=tkfont.Font(family=TITLE_FONT_FAMILY, size=10, weight="bold"), fill="#e8dfbd",
+                             font=tkfont.Font(family=TITLE_FONT_FAMILY, size=-max(9, p(13)), weight="bold"), fill="#e8dfbd",
                              tags="author_text")
 
     def _draw_needle_and_lamp(self):
-        px, py = self.pivot
-        self._needle_shadow = self.create_line(px + 1, py + 1, px + 1, py - 29, fill="#8a7d62", width=3, capstyle="round")
-        self._needle = self.create_line(px, py, px, py - 30, fill="#8b1f16", width=2, capstyle="round")
-        self._cap = self.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#3a3127", outline="#1b1712")
-        cx, cy = 150, 54
-        self._lamp = [self.create_oval(cx - r, cy - r, cx + r, cy + r, fill="#161a17", outline="")
+        p = self.px
+        px_, py = self.pivot
+        self._needle_len = p(30)
+        self._needle_shadow = self.create_line(px_ + 1, py + 1, px_ + 1, py - self._needle_len, fill="#8a7d62",
+                                               width=max(2, p(3)), capstyle="round")
+        self._needle = self.create_line(px_, py, px_, py - self._needle_len, fill="#8b1f16", width=max(1, p(2)), capstyle="round")
+        cap = max(3, p(5))
+        self._cap = self.create_oval(px_ - cap, py - cap, px_ + cap, py + cap, fill="#3a3127", outline="#1b1712")
+        cx, cy = p(150), p(54)
+        self._lamp = [self.create_oval(cx - p(r), cy - p(r), cx + p(r), cy + p(r), fill="#161a17", outline="")
                       for r in (16.5, 14, 11.5, 8.5, 5.5)]
-        self._lamp_spark = self.create_oval(cx - 5, cy - 6, cx - 1, cy - 2, fill="#e9fff0", outline="")
+        self._lamp_spark = self.create_oval(cx - p(5), cy - p(6), cx - p(1), cy - p(2), fill="#e9fff0", outline="")
         self._apply_needle()
         self._apply_lamp(time.monotonic())
 
@@ -207,12 +279,12 @@ class InstrumentHeader(tk.Canvas):
     def _apply_needle(self):
         if not getattr(self, "_needle", None):
             return
-        px, py = self.pivot
+        px_, py = self.pivot
         a = math.radians(self.angle)
-        length = 30
-        end = (px + length * math.sin(a), py - length * math.cos(a))
-        self.coords(self._needle, px, py, *end)
-        self.coords(self._needle_shadow, px + 1, py + 1, end[0] + 1, end[1] + 1)
+        length = getattr(self, "_needle_len", 30)
+        end = (px_ + length * math.sin(a), py - length * math.cos(a))
+        self.coords(self._needle, px_, py, *end)
+        self.coords(self._needle_shadow, px_ + 1, py + 1, end[0] + 1, end[1] + 1)
 
     def _apply_lamp(self, t):
         if not getattr(self, "_lamp", None):
@@ -232,8 +304,11 @@ class InstrumentHeader(tk.Canvas):
             self._apply_lamp(t)
             self._apply_glint(t)
         except tk.TclError:
-            return
-        self._tick_job = self.after(34 if self._glint_start else 70, self._tick)
+            pass
+        try:
+            self._tick_job = self.after(34 if self._glint_start else 70, self._tick)
+        except tk.TclError:
+            self._tick_job = None
 
     def _start_glint(self):
         self._glint_job = None
