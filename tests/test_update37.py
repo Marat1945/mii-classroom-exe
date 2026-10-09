@@ -344,6 +344,7 @@ class MainWindowFeatureTests(TkCase):
             app.connect_google()
         wizard.assert_called_once()
         sync.assert_not_called()
+        google_client.mark_verified()                                       # Google підтвердив вхід у цьому сеансі
         with mock.patch.object(google_client, "token_ready", return_value=True), \
                 mock.patch.object(google_setup_ui, "show_google_wizard") as wizard, \
                 mock.patch.object(app, "sync_classroom") as sync:
@@ -432,7 +433,8 @@ class GoogleWizardTests(TkCase):
             def fake_authenticate(*a, **k):
                 (Path(folder) / "google_token.json").write_text(json.dumps(
                     {"scopes": google_client.SCOPES, "refresh_token": "r", "token": "t"}))
-            with mock.patch.object(google_client, "authenticate", fake_authenticate):
+                google_client.mark_verified()
+            with mock.patch.object(google_client, "reconnect_google", fake_authenticate):
                 wizard.login()
                 pump(self.root, 0.8)
             self.assertEqual(calls, [{"interactive": True, "announce": True}])

@@ -57,10 +57,17 @@ def _plate(window, title, before=None):
 
 def _show(name, title=None, message=None, **options):
     root = _parent(options)
+    custom = options.pop("choices", None)
     if root is None:
+        if custom:
+            return options.get("cancel_value", custom[-1][1])
         return _ORIGINAL[name](title, message, **options)
     kind = options.get("icon") if options.get("icon") in ("info", "warning", "error", "question") else KIND_FOR[name]
     choices, default_value, cancel_value = BUTTONS[name]
+    if custom:                                                          # власні підписи кнопок (ask_choice)
+        choices = tuple(custom)
+        default_value = options.get("default_value", choices[0][1])
+        cancel_value = options.get("cancel_value", choices[-1][1])
     if "default" in options:
         wanted = {"yes": True, "no": False, "ok": True, "cancel": False, "retry": True}.get(str(options["default"]))
         if wanted is not None and any(v == wanted for _, v in choices):
@@ -130,6 +137,12 @@ def _show(name, title=None, message=None, **options):
     getattr(window, "default_button", buttons).focus_set()
     window.wait_window()
     return result["value"]
+
+
+def ask_choice(title, message, choices, **options):
+    """Вікно у стилі програми з власними кнопками: choices = ((підпис, значення), ...). Перша — за замовчуванням (Enter),
+    остання — скасування (Esc, закриття вікна). Повертає значення обраної кнопки."""
+    return _show("askyesno", title, message, choices=choices, **options)
 
 
 def _make(name):

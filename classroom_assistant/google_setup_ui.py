@@ -127,7 +127,7 @@ class GoogleWizard(tk.Toplevel):
 
     def refresh_status(self):
         have_json = google_client.credentials_present()
-        logged_in = google_client.token_ready()
+        logged_in = google_client.connection_state() in ("connected", "connecting", "offline")
         self.json_status.config(
             text=("✅ Файл ключа вибрано" if have_json else "⬜ Файл ключа ще не вибрано (крок 5–6)"),
             foreground="#2E6B30" if have_json else "#9B6A00")
@@ -165,10 +165,12 @@ class GoogleWizard(tk.Toplevel):
 
         def run():
             try:
-                google_client.authenticate()
+                google_client.reconnect_google()          # той самий вхід, що й «Увійти заново»: браузер → перевірка → «підключено»
                 self._outcome = ("ok", "")
-            except Exception as ex:                       # мережа, скасований вхід, помилка доступу
-                self._outcome = ("error", str(ex))
+            except google_client.GoogleLoginCancelled as ex:
+                self._outcome = ("cancel", str(ex))
+            except Exception as ex:                       # мережа, помилка доступу
+                self._outcome = ("error", google_client.friendly_message(ex))
         threading.Thread(target=run, daemon=True).start()
         self.after(300, self._poll_login)
 
@@ -185,6 +187,14 @@ class GoogleWizard(tk.Toplevel):
         kind, message = self._outcome
         if kind == "ok":
             self._done()
+        elif kind == "cancel":
+            self._busy = False
+            try:
+                self.login_button.config(state="normal")
+                self.refresh_status()
+                messagebox.showinfo("Вхід не завершено", message, parent=self)
+            except tk.TclError:
+                pass
         else:
             self._failed(message)
 

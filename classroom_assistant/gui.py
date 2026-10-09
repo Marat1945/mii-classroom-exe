@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import queue
 import threading
 import time
 import shutil
@@ -30,6 +31,7 @@ from .alert_ui import AlertPanel, show_alert_setup
 from .calendar_leaf import DESIGN_H, CalendarLeaf, show_leaf_window
 from .lesson_marks import LessonMarks
 from .materials_ui import show_materials
+from .splash import Splash
 from .alert_ui import HEIGHT as SIDE_HEIGHT
 from .toast import show_toast
 try:
@@ -73,8 +75,12 @@ def weekday_ua(value):
     return WEEKDAYS_UA[parse_date(value).weekday()]
 
 class MainApp(WindowBase):
-    def __init__(self):
+    def __init__(self,show_splash=False):
         super().__init__()
+        self._splash=None
+        if show_splash and not os.environ.get("POMICHNYK_NO_SPLASH"):
+            try:self._splash=Splash(self)                                     # заставка з логотипом (лампочка блимає, доки йде завантаження)
+            except Exception:self._splash=None
         self.title("Помічник учителя Classroom")
         self.geometry("1250x770")
         self.minsize(1060,630)
@@ -82,6 +88,7 @@ class MainApp(WindowBase):
         self.cfg=read_json("Налаштування.json")
         self.state=read_state()
         self.escape_closes=False
+        self._tick_splash()
         apply_theme(self)
         app_icon.set_app_id()
         app_icon.apply(self)                      # логотип замість стандартної пір'їнки Tk
@@ -91,7 +98,10 @@ class MainApp(WindowBase):
                     author="Розробник програми — вчитель історії Пасічник Іван Олегович",
                     animate=not os.environ.get("POMICHNYK_NO_OFFERS"),on_materials=self.open_materials)
         self.header.pack(fill="x",pady=(0,6))
+        self._tick_splash()
         self._sync_running=False;self._sync_again=False;self._last_sync_ts=0.0
+        self._google_busy=False;self._reauth_open=False
+        self._google_events=queue.SimpleQueue();self._google_refreshers=[];self._google_job=None
         self._inbox_busy=False;self._last_matched_sources=set()
         self.rows=[]
         self.google_courses=[]
@@ -99,8 +109,12 @@ class MainApp(WindowBase):
         self.remote_classroom_entries={}
         self._plans_sig=None;self._plans_digest="";self._plans_store={}
         self._build()
+        self._tick_splash()
         add_rivets(self)
         self._register_window_drop()
+        from . import google_client as _gc
+        _gc.add_listener(self._google_state_changed)                      # кнопка й вікна стежать за ПРАВДИВИМ станом входу
+        self._google_job=self.after(400,self._google_poll)
         self._refresh_google_button()
         # прилад на шапці: зв'язок з інтернетом (стрілка й лампочка); у тестах мережу не чіпаємо
         self.alerts=air_alerts.Monitor(lambda:air_alerts.load_settings(DATA),DATA)
@@ -118,6 +132,7 @@ class MainApp(WindowBase):
         self._alert_job=self.after(500,self._alert_poll)
         self._facts_job=self.after(1500,self._facts_poll)
         self.update_day()
+        self._tick_splash()
         self.history=History()
         self.history.reset(self._history_snapshot())
         self.history_undo=self.undo;self.history_redo=self.redo       # Ctrl+Z / Ctrl+Y
@@ -130,6 +145,20 @@ class MainApp(WindowBase):
         self._watcher=lecture_inbox.InboxWatcher(self.state.get("inbox_done"))
         self._watch_since_ns=time.time_ns()-6*3600*10**9
         self._inbox_job=self.after(2500,self._inbox_poll)
+        self._finish_splash()                                            # усе готово: лампочка горить рівно, заставка зникає
+
+    def _tick_splash(self):
+        if self._splash:
+            try:self._splash.pump()
+            except Exception:self._splash=None
+
+    def _finish_splash(self):
+        splash,self._splash=self._splash,None
+        if splash:
+            try:splash.finish()
+            except Exception:
+                try:splash.close()
+                except Exception:pass
 
     def _build(self):
         outer=ttk.Frame(self,padding=12)
@@ -421,13 +450,16 @@ class MainApp(WindowBase):
                 result=task()
                 self.after(0,lambda:self.finish_worker(on_success,result,None))
             except Exception as ex:
-                text=str(ex)
-                self.after(0,lambda:self.finish_worker(on_success,None,text))
+                from . import google_client as gc
+                problem=ex if isinstance(ex,gc.GoogleAuthProblem) else None
+                text=gc.friendly_message(ex)                              # без токенів і секретів
+                self.after(0,lambda:self.finish_worker(on_success,None,text,problem))
         threading.Thread(target=run,daemon=True).start()
 
-    def finish_worker(self,callback,result,error):
+    def finish_worker(self,callback,result,error,problem=None):
         self.config(cursor="")
-        if error:messagebox.showerror("Помилка",error)
+        if problem is not None:self.handle_google_problem(problem)
+        elif error:messagebox.showerror("Помилка",error)
         else:callback(result)
 
     def _parallel(self,lesson):
@@ -1411,6 +1443,11 @@ class MainApp(WindowBase):
         except Exception:pass
         marks=getattr(self,"lesson_marks",None)
         if marks:marks.stop()
+        try:
+            from . import google_client as _gc
+            _gc.remove_listener(self._google_state_changed)
+            if self._google_job:self.after_cancel(self._google_job)
+        except Exception:pass
         for monitor in (getattr(self,"net",None),getattr(self,"alerts",None)):
             try:monitor.stop()
             except Exception:pass
@@ -1504,6 +1541,14 @@ class MainApp(WindowBase):
             ttk.Label(part,text=name[:30],width=27).pack(side="left")
             ttk.Button(part,text="×",width=3,
                        command=lambda j=ix:self.remove_attachment_at(j)).pack(side="right")
+            for widget in [part]+[w for w in part.winfo_children() if w.winfo_class()!="TButton"]:
+                widget.bind("<Double-Button-1>",lambda _e,item=entry:self.preview_attachment(item))     # подвійний клац — перегляд
+                widget.configure(cursor="hand2")
+
+    def preview_attachment(self,entry):
+        """Подвійний клац лівою кнопкою по вкладенню: вікно перегляду прямо в програмі."""
+        from .attachment_preview import show_preview
+        return show_preview(self,entry["path"],entry.get("name"))
 
     def remove_attachment_at(self,index):
         lesson=self.selected()
@@ -1647,7 +1692,40 @@ class MainApp(WindowBase):
         label.configure(state="disabled",bg="#f3f6fa",relief="flat")
         label.pack(fill="both",expand=True,padx=10,pady=10)
         buttons=ttk.Frame(dlg)
-        buttons.pack(fill="x",padx=10,pady=8)
+        buttons.pack(side="bottom",fill="x",padx=10,pady=8)
+
+        from . import google_client as gc
+        google_box=ttk.LabelFrame(dlg,text=" Google Classroom: вхід ",padding=8)
+        google_box.pack(fill="x",padx=10,pady=(0,4))
+        google_status=tk.StringVar(master=dlg)
+        ttk.Label(google_box,textvariable=google_status,font=("Segoe UI",10,"bold")).pack(anchor="w")
+        google_row=ttk.Frame(google_box)
+        google_row.pack(fill="x",pady=(6,0))
+        b_connect=ttk.Button(google_row,text="Підключити Google",command=self.connect_google)
+        b_again=ttk.Button(google_row,text="Увійти в Google заново",command=self.google_reconnect)
+        b_off=ttk.Button(google_row,text="Від'єднати Google",command=self.google_disconnect)
+        b_reset=ttk.Button(google_row,text="Скинути авторизацію Google",command=self.google_reset_authorization)
+
+        def refresh_google(*_):
+            try:
+                if not dlg.winfo_exists():return
+            except tk.TclError:return
+            state=gc.connection_state()
+            have=gc.credentials_present()
+            tokens=any((DATA/name).exists() for name in gc.USER_TOKEN_FILES)
+            google_status.set(f"{self.GOOGLE_LABELS.get(state,'Google не підключено')}   ·   OAuth JSON: "
+                              f"{'імпортовано' if have else 'не імпортовано'}")
+            for button in (b_connect,b_again,b_off,b_reset):button.pack_forget()
+            if state in ("disconnected","reauth"):b_connect.pack(side="left",padx=4)
+            if tokens or state in ("reauth","connected","connecting","offline"):b_again.pack(side="left",padx=4)
+            if tokens and state in ("connected","connecting","offline"):b_off.pack(side="left",padx=4)
+            b_reset.pack(side="right",padx=4)
+        self._google_refreshers.append(refresh_google)                     # оновлюється з головного потоку (_on_google_state)
+        dlg.bind("<Destroy>",lambda e:self._google_refreshers.remove(refresh_google)
+                 if e.widget is dlg and refresh_google in self._google_refreshers else None,add="+")
+        dlg.refresh_google=refresh_google
+        dlg.google_status=google_status
+        dlg.google_buttons={"connect":b_connect,"again":b_again,"disconnect":b_off,"reset":b_reset}
 
         def import_credentials():
             path=filedialog.askopenfilename(
@@ -1656,16 +1734,15 @@ class MainApp(WindowBase):
             )
             if not path: return
             try:
-                content=json.loads(Path(path).read_text(encoding="utf-8-sig"))
-                details=content.get("installed")
-                if not isinstance(details,dict) or not all(k in details for k in ("client_id","auth_uri","token_uri")):
-                    raise ValueError("Це не OAuth Desktop JSON. Потрібен файл клієнта типу «Desktop app».")
-                DATA.mkdir(parents=True,exist_ok=True)
-                target=DATA/"google_credentials.json"
-                shutil.copyfile(path,target)
-                messagebox.showinfo("OAuth", "Google OAuth налаштування імпортовано. Тепер натисніть «Підключити Google» у головному вікні.",parent=dlg)
-            except Exception as ex:
+                gc.import_credentials_file(path)                       # одна перевірка й одне місце збереження для всієї програми
+            except ValueError as ex:
                 messagebox.showerror("Google OAuth",str(ex),parent=dlg)
+                return
+            except Exception as ex:
+                messagebox.showerror("Google OAuth",gc.friendly_message(ex),parent=dlg)
+                return
+            refresh_google()
+            messagebox.showinfo("OAuth","Google OAuth налаштування імпортовано. Тепер натисніть «Підключити Google».",parent=dlg)
 
         def save_key():
             from .editor_ui import api_key_dialog
@@ -1674,6 +1751,7 @@ class MainApp(WindowBase):
         ttk.Button(buttons,text="Імпортувати Google OAuth JSON",command=import_credentials).pack(side="left",padx=5)
         ttk.Button(buttons,text="Зберегти AI-ключ (платний режим)",command=save_key).pack(side="left",padx=5)
         ttk.Button(buttons,text="Закрити",command=dlg.destroy).pack(side="right",padx=5)
+        refresh_google()
 
     # ---------- Назад / Вперед ----------
     def _plans_digest_now(self):
@@ -1841,29 +1919,162 @@ class MainApp(WindowBase):
                     "файл КТП на клас: програма сама визначить, кому він підходить.")
         return "Теми в КТП завершилися або план не перевірено."
 
+    GOOGLE_LABELS={"connected":"✓ Google підключено","connecting":"Підключення до Google...",
+                   "offline":"Google: немає зв'язку","disconnected":"Google не підключено","reauth":"Google не підключено"}
+
     def _refresh_google_button(self):
-        """Підпис кнопки показує стан: «✓ Google підключено» або «Підключити Google»."""
+        """Підпис кнопки — ПРАВДИВИЙ стан: «✓ Google підключено» лише після підтвердження від Google; інакше
+        «Google не підключено» чи тимчасово «Підключення до Google...»."""
         from . import google_client
-        try:ready=bool(google_client.token_ready())
-        except Exception:ready=False
+        try:state=google_client.connection_state()
+        except Exception:state="disconnected"
         try:
-            self.google_button.config(text="✓ Google підключено" if ready else "Підключити Google")
+            self.google_button.config(text=self.GOOGLE_LABELS.get(state,"Google не підключено"))
             row=self.google_button.master                      # підпис змінив ширину: перерахувати рядок шапки
             row.after_idle(row._layout)
         except (AttributeError,tk.TclError):pass
 
+    def _google_state_changed(self,state):
+        """Слухач стану входу. Викликається і з фонових потоків, тому Tk тут НЕ чіпаємо: лише черга, яку забирає головний потік."""
+        self._google_events.put(state)
+
+    def _google_poll(self):
+        self._google_job=None
+        try:
+            if not self.winfo_exists():return
+        except tk.TclError:return
+        last=None
+        try:
+            while True:last=self._google_events.get_nowait()
+        except queue.Empty:pass
+        if last is not None:self._on_google_state(last)
+        try:self._google_job=self.after(400,self._google_poll)
+        except tk.TclError:pass
+
+    def _on_google_state(self,state):
+        try:
+            if not self.winfo_exists():return
+        except tk.TclError:return
+        self._refresh_google_button()
+        for refresh in list(self._google_refreshers):                       # відкриті вікна з кнопками Google
+            try:refresh()
+            except tk.TclError:pass
+        if state=="reauth":self.prompt_reauth()
+
     def connect_google(self):
-        """Перший раз — покрокова інструкція; далі — оновлення з Classroom з короткою відповіддю на екрані."""
+        """Підключено — оновлення з Classroom; файл ключа вже є — одразу вхід у Google (без вибору JSON); інакше — майстер."""
         from . import google_client
-        if google_client.token_ready():
+        state=google_client.connection_state()
+        if state=="connected" or (state=="offline" and google_client.token_ready()):
             if self._sync_running:
                 show_toast(self,"Оновлення Classroom уже триває…",1800)
                 return
-            show_toast(self,"✓ Google уже підключено · оновлюю дані Classroom…",2200)
+            show_toast(self,"✓ Google уже підключено · оновлюю дані Classroom…" if state=="connected" else
+                       "Перевіряю зв'язок із Google…",2200)
             self.sync_classroom(interactive=True,announce=True)
+            return
+        if state=="connecting":
+            show_toast(self,"Підключення до Google триває…",1800)
+            return
+        if google_client.credentials_present():
+            self.google_reconnect(confirm=False)               # файл ключа вже імпортовано: одразу вхід у Google
             return
         from .google_setup_ui import show_google_wizard
         show_google_wizard(self)
+
+    # ---------- керування входом у Google (усе через google_client) ----------
+    def prompt_reauth(self,message=None):
+        """Потрібен повторний вхід: зрозуміле вікно замість технічної помилки (одне, без дублів)."""
+        if self._reauth_open:return
+        self._reauth_open=True
+        try:
+            from . import google_client
+            from .themed_dialogs import ask_choice
+            answer=ask_choice("Потрібен повторний вхід у Google",message or google_client.REAUTH_TEXT,
+                              (("Увійти заново",True),("Скасувати",False)),icon="warning",parent=self)
+        finally:
+            self._reauth_open=False
+        if answer:self.google_reconnect(confirm=False)
+
+    def handle_google_problem(self,problem):
+        """Єдине місце реакції на проблеми входу: повторний вхід, «не підключено», скасування."""
+        from . import google_client as gc
+        if isinstance(problem,gc.GoogleReauthRequired):
+            self.foot.config(text="Google не підключено: потрібен повторний вхід.")
+            self.prompt_reauth()
+        elif isinstance(problem,gc.GoogleClientMissing):
+            messagebox.showinfo("Google",str(problem),parent=self)
+        elif isinstance(problem,gc.GoogleLoginCancelled):
+            show_toast(self,str(problem),3600,"warn")
+        else:
+            messagebox.showinfo("Google",str(problem),parent=self)
+        self._refresh_google_button()
+
+    def google_reconnect(self,confirm=True):
+        """«Увійти в Google заново»: скинути дозвіл користувача (файл клієнта лишається) → браузер → перевірка → «підключено»."""
+        from . import google_client as gc
+        if self._google_busy:
+            show_toast(self,"Очікую завершення входу в браузері…",2000)
+            return
+        if not gc.credentials_present():
+            messagebox.showinfo("Google",gc.NO_CLIENT_TEXT,parent=self)
+            return
+        if confirm and not messagebox.askyesno("Увійти в Google заново",
+                "Поточний сеанс Google буде скинуто. Розклад, КТП, зіставлення курсів та інші дані програми не буде видалено. Продовжити?",
+                parent=self):
+            return
+        self._google_busy=True
+        outcome={}
+        def run():
+            try:
+                gc.reconnect_google()
+                outcome["ok"]=True
+            except BaseException as error:                           # скасування, мережа, відмова: програма не падає
+                outcome["error"]=error
+        threading.Thread(target=run,daemon=True).start()
+        self._refresh_google_button()
+        show_toast(self,"Відкриваю браузер: завершіть вхід у Google…",3600)
+        def poll():
+            try:
+                if not self.winfo_exists():return
+            except tk.TclError:return
+            if not outcome:
+                self.after(300,poll)
+                return
+            self._google_busy=False
+            self._refresh_google_button()
+            error=outcome.get("error")
+            if error is None:
+                show_toast(self,"✓ Google підключено · оновлюю дані Classroom…",2600)
+                self.sync_classroom(interactive=True,announce=True)
+            elif isinstance(error,gc.GoogleAuthProblem):
+                self.handle_google_problem(error)
+            else:
+                messagebox.showerror("Вхід у Google не виконано",gc.friendly_message(error),parent=self)
+        self.after(300,poll)
+
+    def google_disconnect(self):
+        """«Від'єднати Google»: локальний дозвіл очищується, токен відкликається в Google (якщо вдасться), браузер не відкривається."""
+        from . import google_client as gc
+        if not messagebox.askyesno("Від'єднати Google",
+                "Від'єднати Google від цієї програми? Розклад, КТП та локальні дані не буде видалено.",parent=self):
+            return
+        def task():
+            return gc.disconnect_google()
+        def done(report):
+            self._refresh_google_button()
+            show_toast(self,"Google від'єднано · розклад і КТП на місці",3000)
+        self.worker(task,done)
+
+    def google_reset_authorization(self):
+        """Діагностичний скид: лише локальний вхід у Google (без запитів до Google); дані програми й файл ключа не чіпаються."""
+        from . import google_client as gc
+        if not messagebox.askyesno("Скинути авторизацію Google",
+                "Скинути вхід у Google на цьому комп'ютері? Розклад, КТП, файл OAuth JSON та інші дані не буде видалено.",parent=self):
+            return
+        gc.reset_authorization()
+        self._refresh_google_button()
+        show_toast(self,"Авторизацію Google скинуто · файл ключа збережено",3000)
 
     def sync_classroom(self,interactive=False,manual=False,announce=False):
         """Курси (у порядку Classroom) + стан усіх наявних матеріалів. Лише читання."""
@@ -1884,8 +2095,10 @@ class MainApp(WindowBase):
             try:
                 result=google_client.sync_everything(titles,known,progress)
                 self.after(0,lambda:self._sync_done(result,interactive,announce))
+            except google_client.GoogleAuthProblem as ex:
+                self.after(0,lambda:self._sync_auth_problem(ex))
             except Exception as ex:
-                text=str(ex)
+                text=google_client.friendly_message(ex)
                 self.after(0,lambda:self._sync_failed(text,interactive))
         threading.Thread(target=run,daemon=True).start()
 
@@ -2098,6 +2311,12 @@ class MainApp(WindowBase):
         elif announce:
             show_toast(self,f"✓ Classroom оновлено: курсів — {len(result['courses'])}, записів — {records}",2600)
         self._after_sync()
+
+    def _sync_auth_problem(self,problem):
+        self._sync_running=False
+        self._sync_again=False                                   # дозвіл недійсний: не повторювати спроби
+        self.foot.config(text="Синхронізація з Classroom не вдалася: Google не підключено (дані на екрані — з останнього разу).")
+        self.handle_google_problem(problem)
 
     def _sync_failed(self,error,interactive):
         self._sync_running=False
@@ -2357,4 +2576,4 @@ class MainApp(WindowBase):
 
 def launch():
     app_icon.set_app_id()
-    MainApp().mainloop()
+    MainApp(show_splash=True).mainloop()

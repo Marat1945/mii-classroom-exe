@@ -182,11 +182,15 @@ class GoogleButtonTests(TempProgram):
 
     def test_label_shows_whether_google_is_connected(self):
         with mock.patch.object(google_client, "token_ready", return_value=True):
+            self.app._refresh_google_button()                                         # файл є, але Google ще не підтвердив
+            self.assertEqual(str(self.app.google_button.cget("text")), "Підключення до Google...")
+            google_client.mark_verified()
             self.app._refresh_google_button()
             self.assertEqual(str(self.app.google_button.cget("text")), "✓ Google підключено")
+        google_client.reset_session()
         with mock.patch.object(google_client, "token_ready", return_value=False):
             self.app._refresh_google_button()
-            self.assertEqual(str(self.app.google_button.cget("text")), "Підключити Google")
+            self.assertEqual(str(self.app.google_button.cget("text")), "Google не підключено")
 
     def test_header_is_laid_out_again_when_the_label_changes_width(self):
         row = self.app.google_button.master
@@ -201,6 +205,7 @@ class GoogleButtonTests(TempProgram):
     def test_click_when_connected_answers_at_once_and_after_the_update(self):
         started = []
         self.app.sync_classroom = lambda **kw: started.append(kw)
+        google_client.mark_verified()
         with mock.patch.object(google_client, "token_ready", return_value=True), \
                 mock.patch.object(gui.messagebox, "showinfo", side_effect=AssertionError("вікно з «ОК»!")):
             self.app.connect_google()
@@ -213,6 +218,7 @@ class GoogleButtonTests(TempProgram):
         started = []
         self.app.sync_classroom = lambda **kw: started.append(kw)
         self.app._sync_running = True
+        google_client.mark_verified()
         with mock.patch.object(google_client, "token_ready", return_value=True):
             self.app.connect_google()
         self.assertIn("уже триває", self.toasts[-1])

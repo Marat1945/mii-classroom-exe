@@ -56,6 +56,9 @@ class TkCase(unittest.TestCase):
                 probe.destroy()
         except tk.TclError:
             self.skipTest("немає дисплея")
+        from classroom_assistant import google_client as _google_client
+        _google_client.reset_session()                                   # стан входу в Google не «тече» між тестами
+        self.addCleanup(_google_client.reset_session)
         for name, value in (("showinfo", None), ("showwarning", None), ("showerror", None),
                             ("askyesno", True), ("askyesnocancel", False)):
             for module in (editor_ui, chatgpt_ui, gui, samples_ui):

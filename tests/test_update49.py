@@ -173,7 +173,7 @@ class MainWindowIconTests(TempProgram):
         order = []
         with mock.patch.object(app_icon, "set_app_id", side_effect=lambda: order.append("id")), \
                 mock.patch.object(gui, "MainApp") as app:
-            app.side_effect = lambda: order.append("window") or mock.Mock()
+            app.side_effect = lambda **kw: order.append("window") or mock.Mock()
             gui.launch()
         self.assertEqual(order, ["id", "window"])
 
