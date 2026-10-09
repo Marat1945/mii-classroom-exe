@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """Windows EXE entrypoint. Показати помилку вікном, якщо запуск не вдався."""
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) >= 2 and sys.argv[1] == "--self-test":          # лише для збірки на GitHub: перевірити, що .exe справді стартує
+        from classroom_assistant.selftest import run
+        sys.exit(run(sys.argv[2] if len(sys.argv) > 2 else None))
     try:
         from classroom_assistant.gui import launch
         launch()
